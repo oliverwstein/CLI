@@ -500,7 +500,15 @@ func (m *AppModel) ToggleSection(sectionID string) tea.Cmd {
 
 // Message types for Bubble Tea command system
 
-// commandExecutedMsg carries the result of command execution
+// ConnectionStatusMsg carries connection status updates. It is EXPORTED because it is
+// handled by the parent controller to switch back to the menu view.
+type ConnectionStatusMsg struct {
+	Connected bool
+	Error     string
+}
+
+// commandExecutedMsg carries the result of command execution. It is an internal
+// message type and remains UNEXPORTED.
 type commandExecutedMsg struct {
 	command         string
 	response        *interfaces.CommandResponse
@@ -510,7 +518,8 @@ type commandExecutedMsg struct {
 	duration        time.Duration
 }
 
-// actionExecutedMsg carries the result of action execution
+// actionExecutedMsg carries the result of action execution. It is an internal
+// message type and remains UNEXPORTED.
 type actionExecutedMsg struct {
 	action          interfaces.Action
 	response        *interfaces.CommandResponse
@@ -520,20 +529,16 @@ type actionExecutedMsg struct {
 	duration        time.Duration
 }
 
-// sectionToggledMsg indicates that a collapsible section was toggled
+// sectionToggledMsg indicates that a collapsible section was toggled. It is an internal
+// message type and remains UNEXPORTED.
 type sectionToggledMsg struct {
 	sectionID string
 	expanded  bool
 	error     string
 }
 
-// connectionStatusMsg carries connection status updates
-type connectionStatusMsg struct {
-	connected bool
-	error     string
-}
-
-// applicationInfoMsg carries application metadata from the connected service
+// applicationInfoMsg carries application metadata from the connected service. It is an
+// internal message type and remains UNEXPORTED.
 type applicationInfoMsg struct {
 	appName         string
 	appVersion      string
@@ -593,9 +598,9 @@ func (m *AppModel) disconnectAndReturn() tea.Cmd {
 			m.protocolClient.Disconnect()
 		}
 
-		// Signal return to menu mode
-		return connectionStatusMsg{
-			connected: false,
+		// Signal return to menu mode using the EXPORTED message type and field name.
+		return ConnectionStatusMsg{
+			Connected: false,
 		}
 	})
 }
@@ -790,5 +795,14 @@ func (m *AppModel) clearStatus() {
 		m.recoveryManager.EndSession()
 		m.currentError = nil
 		m.actionsPane.Reset()
+	}
+}
+
+func (m *AppModel) updateCollapsibleElementsFromHistory() {
+	m.collapsibleElements = []CollapsibleElement{}
+	for _, entry := range m.commandHistory {
+		// Since updateCollapsibleElements is also a method on AppModel,
+		// we can call it directly.
+		m.updateCollapsibleElements(entry.Rendered)
 	}
 }

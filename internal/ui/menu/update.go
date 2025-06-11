@@ -17,15 +17,21 @@ func (m *MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// If we are connecting, ignore all other input.
 	if m.isConnecting {
+		// **FIX 1:** Use the now-public ConnectionResultMsg type.
 		switch msg := msg.(type) {
-		case connectionResultMsg:
+		case ConnectionResultMsg:
 			m.isConnecting = false
-			if msg.err != nil {
-				m.err = msg.err
+			// **FIX 2:** Use the now-public field names: msg.Err and msg.Model
+			if msg.Err != nil {
+				m.err = msg.Err
 				return m, nil
 			}
-			// On successful connection, switch to the Application Mode model.
-			return msg.model, msg.model.Init()
+			// On successful connection, the PARENT controller will handle this message.
+			// This model should not be switching to the new model itself. It should
+			// just return the message up the chain.
+			// So, this case will be handled by the parent `ConsoleController`.
+			// The logic here is for when this model is run standalone.
+			return msg.Model, msg.Model.Init()
 		default:
 			return m, nil
 		}
@@ -66,14 +72,17 @@ func (m *MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		cmds = append(cmds, m.updateHealth(), tick()) // Re-queue the tick
 
-	case connectionResultMsg:
+	// **FIX 1:** This case is for when the message is handled by this model directly.
+	// In the integrated app, the parent `ConsoleController` will intercept this message first.
+	case ConnectionResultMsg:
 		m.isConnecting = false
-		if msg.err != nil {
-			m.err = msg.err
+		// **FIX 2:** Use the now-public field names: msg.Err and msg.Model
+		if msg.Err != nil {
+			m.err = msg.Err
 			return m, nil
 		}
 		// Successful connection, switch to AppModel.
-		return msg.model.Update(nil) // Pass control to the new model
+		return msg.Model, msg.Model.Init()
 	}
 
 	// Update the text input if it's focused

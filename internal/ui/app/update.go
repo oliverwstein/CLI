@@ -45,7 +45,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sectionToggledMsg:
 		m.handleSectionToggled(msg)
 
-	case connectionStatusMsg:
+	case ConnectionStatusMsg:
 		return m.handleConnectionStatus(msg)
 
 	case applicationInfoMsg:
@@ -548,12 +548,13 @@ func (m *AppModel) handleCommandExecuted(msg commandExecutedMsg) tea.Cmd {
 		m.addToHistory(historyEntry) // Add to history before rendering content
 		return m.renderResponseContent(historyEntry.Response)
 	} else {
-		// Handle error case
+		// Implement correct error handling logic.
 		var processedErr *errors.ProcessedError
+		// Prioritize structured errors if they exist.
 		if msg.structuredError != nil {
 			processedErr, _ = m.errorHandler.ProcessErrorResponse(msg.structuredError)
 		} else {
-			// **FIX:** Correctly initialize the struct before creating a pointer to it.
+			// Fallback to creating a basic error response from the simple string.
 			var errResp interfaces.ErrorResponse
 			errResp.Error.Message = msg.error
 			processedErr, _ = m.errorHandler.ProcessErrorResponse(&errResp)
@@ -606,12 +607,13 @@ func (m *AppModel) handleActionExecuted(msg actionExecutedMsg) tea.Cmd {
 		// Process response content
 		return m.renderResponseContent(msg.response)
 	} else {
-		// Handle error case
+		// Implement correct error handling logic.
 		var processedErr *errors.ProcessedError
+		// Prioritize structured errors if they exist.
 		if msg.structuredError != nil {
 			processedErr, _ = m.errorHandler.ProcessErrorResponse(msg.structuredError)
 		} else {
-			// **FIX:** Correctly initialize the struct before creating a pointer to it.
+			// Fallback to creating a basic error response from the simple string.
 			var errResp interfaces.ErrorResponse
 			errResp.Error.Message = msg.error
 			processedErr, _ = m.errorHandler.ProcessErrorResponse(&errResp)
@@ -645,17 +647,24 @@ func (m *AppModel) handleSectionToggled(msg sectionToggledMsg) {
 }
 
 // handleConnectionStatus processes connection status changes
-func (m *AppModel) handleConnectionStatus(msg connectionStatusMsg) (tea.Model, tea.Cmd) {
-	if !msg.connected {
-		// Connection lost or intentionally disconnected
-		// Return to menu mode (this would typically return a different model)
-		// For now, we'll quit the application
-		return m, tea.Quit
-	}
-
-	m.connected = msg.connected
-	if msg.error != "" {
-		m.connectionError = msg.error
+func (m *AppModel) handleConnectionStatus(msg ConnectionStatusMsg) (tea.Model, tea.Cmd) {
+	if !msg.Connected {
+		// Connection lost or intentionally disconnected.
+		// The main controller will handle switching back to the menu.
+		// This model should simply propagate the message.
+		// Returning 'm' and 'tea.Quit' would be incorrect in the context of the main controller.
+		// The parent controller is responsible for the model switch.
+		// So we just update our state and let the parent handle the rest.
+		m.connected = false
+		m.connectionError = "Disconnected"
+		if msg.Error != "" {
+			m.connectionError = msg.Error
+		}
+	} else {
+		m.connected = msg.Connected
+		if msg.Error != "" {
+			m.connectionError = msg.Error
+		}
 	}
 
 	return m, nil
@@ -757,14 +766,14 @@ func (m *AppModel) recordNavigation(fromFocus FocusState, method string) {
 func (m *AppModel) refreshConnection() tea.Cmd {
 	return tea.Cmd(func() tea.Msg {
 		if !m.protocolClient.IsConnected() {
-			return connectionStatusMsg{
-				connected: false,
-				error:     "Connection lost",
+			return ConnectionStatusMsg{
+				Connected: false,
+				Error:     "Connection lost",
 			}
 		}
 
-		return connectionStatusMsg{
-			connected: true,
+		return ConnectionStatusMsg{
+			Connected: true,
 		}
 	})
 }
@@ -780,12 +789,4 @@ func (m *AppModel) reRenderHistory() {
 		}
 	}
 	m.updateCollapsibleElementsFromHistory()
-}
-
-// updateCollapsibleElementsFromHistory rebuilds the collapsible element list from the entire history.
-func (m *AppModel) updateCollapsibleElementsFromHistory() {
-	m.collapsibleElements = []CollapsibleElement{}
-	for _, entry := range m.commandHistory {
-		m.updateCollapsibleElements(entry.Rendered)
-	}
 }

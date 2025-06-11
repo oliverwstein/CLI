@@ -85,22 +85,30 @@ func (m *MenuModel) Init() tea.Cmd {
 
 // Helper commands and messages
 
+// ConnectionResultMsg is sent after a connection attempt. It is handled by the
+// parent controller to determine whether to switch to Application Mode or display an error.
+// This type is EXPORTED because it is part of the package's public API.
+type ConnectionResultMsg struct {
+	Model tea.Model // The new AppModel on success, or nil on failure
+	Err   error
+}
+
 type (
 	// appsReloadedMsg is sent when the list of registered apps is reloaded.
+	// This is an internal message and remains UNEXPORTED.
 	appsReloadedMsg struct {
 		apps []interfaces.RegisteredApp
 		err  error
 	}
+
 	// healthStatusUpdatedMsg is sent when new health data is available.
+	// This is an internal message and remains UNEXPORTED.
 	healthStatusUpdatedMsg struct {
 		health map[string]*interfaces.AppHealth
 	}
-	// connectionResultMsg is sent after a connection attempt.
-	connectionResultMsg struct {
-		model tea.Model // The new AppModel on success, or nil on failure
-		err   error
-	}
+
 	// tickMsg is used to trigger periodic health updates.
+	// This is an internal message and remains UNEXPORTED.
 	tickMsg struct{}
 )
 
@@ -156,14 +164,16 @@ func (m *MenuModel) attemptConnection(profileName, hostOverride string) tea.Cmd 
 			// Load profile from config
 			profile, err = m.configManager.LoadProfile(profileName)
 			if err != nil {
-				return connectionResultMsg{err: fmt.Errorf("failed to load profile '%s': %w", profileName, err)}
+				// Return the EXPORTED message type with the EXPORTED field name.
+				return ConnectionResultMsg{Err: fmt.Errorf("failed to load profile '%s': %w", profileName, err)}
 			}
 		}
 
 		// Perform connection
 		_, err = m.protocolClient.Connect(context.Background(), profile.Host, &profile.Auth)
 		if err != nil {
-			return connectionResultMsg{err: fmt.Errorf("connection to %s failed: %w", profile.Host, err)}
+			// Return the EXPORTED message type with the EXPORTED field name.
+			return ConnectionResultMsg{Err: fmt.Errorf("connection to %s failed: %w", profile.Host, err)}
 		}
 
 		// On success, create and return the new Application Mode model
@@ -174,6 +184,7 @@ func (m *MenuModel) attemptConnection(profileName, hostOverride string) tea.Cmd 
 			m.configManager,
 			m.authManager,
 		)
-		return connectionResultMsg{model: appModel}
+		// Return the EXPORTED message type with the EXPORTED field name.
+		return ConnectionResultMsg{Model: appModel}
 	}
 }
