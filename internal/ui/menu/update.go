@@ -1,7 +1,5 @@
-// Package menu implements user input processing and state management for Console Menu Mode.
-// This file contains the Bubble Tea update function that processes keyboard input for
-// numbered application selection, Tab navigation, Enter key for connection initiation,
-// and meta commands for application registration and profile management.
+// In internal/ui/menu/update.go
+
 package menu
 
 import (
@@ -15,33 +13,15 @@ func (m *MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
 
-	// If we are connecting, ignore all other input.
-	if m.isConnecting {
-		// **FIX 1:** Use the now-public ConnectionResultMsg type.
-		switch msg := msg.(type) {
-		case ConnectionResultMsg:
-			m.isConnecting = false
-			// **FIX 2:** Use the now-public field names: msg.Err and msg.Model
-			if msg.Err != nil {
-				m.err = msg.Err
-				return m, nil
-			}
-			// On successful connection, the PARENT controller will handle this message.
-			// This model should not be switching to the new model itself. It should
-			// just return the message up the chain.
-			// So, this case will be handled by the parent `ConsoleController`.
-			// The logic here is for when this model is run standalone.
-			return msg.Model, msg.Model.Init()
-		default:
-			return m, nil
-		}
-	}
-
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Clear error on any key press
-		if m.err != nil {
+		// Clear error on any key press, but not while connecting
+		if m.err != nil && !m.isConnecting {
 			m.err = nil
+		}
+		// Don't process key presses while a connection is in progress
+		if m.isConnecting {
+			return m, nil
 		}
 
 		switch m.focusState {
@@ -56,7 +36,6 @@ func (m *MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-	// Handle our custom messages
 	case appsReloadedMsg:
 		if msg.err != nil {
 			m.err = msg.err
@@ -70,25 +49,27 @@ func (m *MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tickMsg:
-		cmds = append(cmds, m.updateHealth(), tick()) // Re-queue the tick
+		if !m.isConnecting {
+			cmds = append(cmds, m.updateHealth())
+		}
+		cmds = append(cmds, tick())
 
-	// **FIX 1:** This case is for when the message is handled by this model directly.
-	// In the integrated app, the parent `ConsoleController` will intercept this message first.
 	case ConnectionResultMsg:
 		m.isConnecting = false
-		// **FIX 2:** Use the now-public field names: msg.Err and msg.Model
 		if msg.Err != nil {
 			m.err = msg.Err
+			m.statusMessage = ""
 			return m, nil
 		}
-		// Successful connection, switch to AppModel.
-		return msg.Model, msg.Model.Init()
-	}
+		return m, func() tea.Msg { return msg }
 
-	// Update the text input if it's focused
-	if m.focusState == FocusInput {
-		m.quickConnectInput, cmd = m.quickConnectInput.Update(msg)
-		cmds = append(cmds, cmd)
+	// This case is necessary if we are not handling character input inside the KeyMsg case
+	// for the text input. We let the default bubble tea update handle non-key messages.
+	default:
+		if m.focusState == FocusInput && !m.isConnecting {
+			m.quickConnectInput, cmd = m.quickConnectInput.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -99,17 +80,14 @@ func (m *MenuModel) handleListKeys(msg tea.KeyMsg) tea.Cmd {
 	switch key := msg.String(); key {
 	case "ctrl+c", "q":
 		return tea.Quit
-
 	case "up", "k":
 		if m.selectedIndex > 0 {
 			m.selectedIndex--
 		}
-
 	case "down", "j":
 		if m.selectedIndex < len(m.registeredApps)-1 {
 			m.selectedIndex++
 		}
-
 	case "enter":
 		if len(m.registeredApps) > 0 && m.selectedIndex < len(m.registeredApps) {
 			m.isConnecting = true
@@ -117,13 +95,10 @@ func (m *MenuModel) handleListKeys(msg tea.KeyMsg) tea.Cmd {
 			m.err = nil
 			return m.attemptConnection(m.registeredApps[m.selectedIndex].Profile, "")
 		}
-
 	case "tab":
 		m.focusState = FocusInput
-		m.quickConnectInput.Focus()
-
+		return m.quickConnectInput.Focus()
 	default:
-		// Allow connecting via number keys
 		if i, err := strconv.Atoi(key); err == nil {
 			if i >= 1 && i <= len(m.registeredApps) {
 				m.selectedIndex = i - 1
@@ -139,10 +114,10 @@ func (m *MenuModel) handleListKeys(msg tea.KeyMsg) tea.Cmd {
 
 // handleInputKeys processes key presses when the quick connect input is focused.
 func (m *MenuModel) handleInputKeys(msg tea.KeyMsg) tea.Cmd {
+	// Check for keys we want to handle specially
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return tea.Quit
-
 	case "enter":
 		host := m.quickConnectInput.Value()
 		if host != "" {
@@ -151,10 +126,15 @@ func (m *MenuModel) handleInputKeys(msg tea.KeyMsg) tea.Cmd {
 			m.err = nil
 			return m.attemptConnection("", host)
 		}
-
+		return nil // Do nothing if input is empty
 	case "tab", "shift+tab":
 		m.focusState = FocusList
 		m.quickConnectInput.Blur()
+		return nil
+	default:
+		// If it's not a special key, pass it to the textinput component for character entry.
+		var cmd tea.Cmd
+		m.quickConnectInput, cmd = m.quickConnectInput.Update(msg)
+		return cmd
 	}
-	return nil
 }
