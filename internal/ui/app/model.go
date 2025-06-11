@@ -333,10 +333,11 @@ func (m *AppModel) ExecuteCommand(command string) tea.Cmd {
 		duration := time.Since(startTime)
 
 		if err != nil {
-			// **FIX:** Check if the returned error is a protocol.ProtocolError and try to extract structured error details.
-			if protoErr, ok := err.(*protocol.ProtocolError); ok && protoErr.HTTPDetails != nil {
+			// Check if the returned error is a structured protocol error
+			if protoErr, ok := err.(*protocol.ProtocolError); ok && protoErr.HTTPDetails != nil && protoErr.HTTPDetails.Body != "" {
 				var structuredErr interfaces.ErrorResponse
 				if json.Unmarshal([]byte(protoErr.HTTPDetails.Body), &structuredErr) == nil {
+					// Successfully parsed structured error
 					return commandExecutedMsg{
 						command:         command,
 						success:         false,
@@ -345,7 +346,7 @@ func (m *AppModel) ExecuteCommand(command string) tea.Cmd {
 					}
 				}
 			}
-			// Fallback to simple error string if not a structured protocol error.
+			// Fallback to a simple error string if parsing fails or it's not a structured protocol error
 			return commandExecutedMsg{
 				command:  command,
 				success:  false,
@@ -411,10 +412,11 @@ func (m *AppModel) ExecuteAction(actionIndex int) tea.Cmd {
 		duration := time.Since(startTime)
 
 		if err != nil {
-			// **FIX:** Check if the returned error is a protocol.ProtocolError and try to extract structured error details.
-			if protoErr, ok := err.(*protocol.ProtocolError); ok && protoErr.HTTPDetails != nil {
+			// Check if the returned error is a structured protocol error
+			if protoErr, ok := err.(*protocol.ProtocolError); ok && protoErr.HTTPDetails != nil && protoErr.HTTPDetails.Body != "" {
 				var structuredErr interfaces.ErrorResponse
 				if json.Unmarshal([]byte(protoErr.HTTPDetails.Body), &structuredErr) == nil {
+					// Successfully parsed structured error
 					return actionExecutedMsg{
 						action:          *selectedAction,
 						success:         false,
@@ -423,7 +425,7 @@ func (m *AppModel) ExecuteAction(actionIndex int) tea.Cmd {
 					}
 				}
 			}
-			// Fallback to simple error string.
+			// Fallback to a simple error string
 			return actionExecutedMsg{
 				action:   *selectedAction,
 				success:  false,
@@ -500,15 +502,7 @@ func (m *AppModel) ToggleSection(sectionID string) tea.Cmd {
 
 // Message types for Bubble Tea command system
 
-// ConnectionStatusMsg carries connection status updates. It is EXPORTED because it is
-// handled by the parent controller to switch back to the menu view.
-type ConnectionStatusMsg struct {
-	Connected bool
-	Error     string
-}
-
-// commandExecutedMsg carries the result of command execution. It is an internal
-// message type and remains UNEXPORTED.
+// commandExecutedMsg carries the result of command execution
 type commandExecutedMsg struct {
 	command         string
 	response        *interfaces.CommandResponse
@@ -518,8 +512,7 @@ type commandExecutedMsg struct {
 	duration        time.Duration
 }
 
-// actionExecutedMsg carries the result of action execution. It is an internal
-// message type and remains UNEXPORTED.
+// actionExecutedMsg carries the result of action execution
 type actionExecutedMsg struct {
 	action          interfaces.Action
 	response        *interfaces.CommandResponse
@@ -529,16 +522,20 @@ type actionExecutedMsg struct {
 	duration        time.Duration
 }
 
-// sectionToggledMsg indicates that a collapsible section was toggled. It is an internal
-// message type and remains UNEXPORTED.
+// sectionToggledMsg indicates that a collapsible section was toggled
 type sectionToggledMsg struct {
 	sectionID string
 	expanded  bool
 	error     string
 }
 
-// applicationInfoMsg carries application metadata from the connected service. It is an
-// internal message type and remains UNEXPORTED.
+// ConnectionStatusMsg carries connection status updates and is EXPORTED
+type ConnectionStatusMsg struct {
+	Connected bool
+	Error     string
+}
+
+// applicationInfoMsg carries application metadata from the connected service
 type applicationInfoMsg struct {
 	appName         string
 	appVersion      string
@@ -569,7 +566,10 @@ func (m *AppModel) loadApplicationInfo() tea.Cmd {
 
 // handleMetaCommand processes console meta commands
 func (m *AppModel) handleMetaCommand(command string) tea.Cmd {
-	switch strings.ToLower(command) {
+	parts := strings.Fields(command)
+	cmd := strings.ToLower(parts[0])
+
+	switch cmd {
 	case "/quit", "/exit":
 		return m.disconnectAndReturn()
 	case "/clear":
@@ -584,6 +584,15 @@ func (m *AppModel) handleMetaCommand(command string) tea.Cmd {
 		return m.retryLastCommand()
 	case "/history":
 		return m.showCommandHistory()
+	case "/theme":
+		themeName := ""
+		if len(parts) > 1 {
+			themeName = parts[1]
+		}
+		return m.changeTheme(themeName)
+	case "/connect":
+		m.statusMessage = "Disconnecting to switch connection. Please select from the menu."
+		return m.disconnectAndReturn()
 	default:
 		return m.showError(fmt.Sprintf("Unknown meta command: %s", command))
 	}
@@ -598,7 +607,7 @@ func (m *AppModel) disconnectAndReturn() tea.Cmd {
 			m.protocolClient.Disconnect()
 		}
 
-		// Signal return to menu mode using the EXPORTED message type and field name.
+		// Signal return to menu mode
 		return ConnectionStatusMsg{
 			Connected: false,
 		}
@@ -621,6 +630,8 @@ func (m *AppModel) showHelp() tea.Cmd {
 /collapse-all   - Collapse all collapsible sections
 /retry          - Retry the last command
 /history        - Show command history
+/theme <name>   - Change visual theme
+/connect        - Disconnect and return to menu
 
 Keyboard Navigation:
 Tab             - Cycle through focusable elements
@@ -696,11 +707,17 @@ func (m *AppModel) showCommandHistory() tea.Cmd {
 		return m.showError("No command history available")
 	}
 
-	historyText := "Command History:\n"
+	var historyLines []string
+	historyLines = append(historyLines, "--- Command History ---")
 	for i, entry := range m.commandHistory {
-		historyText += fmt.Sprintf("%d. %s (%s)\n",
-			i+1, entry.Command, entry.Timestamp.Format("15:04:05"))
+		// Only show user-issued commands, not action markers
+		if !strings.HasPrefix(entry.Command, "[Action]") {
+			historyLines = append(historyLines, fmt.Sprintf("%3d: %s (%s)",
+				i+1, entry.Command, entry.Timestamp.Format("15:04:05")))
+		}
 	}
+	historyLines = append(historyLines, "-----------------------")
+	historyText := strings.Join(historyLines, "\n")
 
 	return tea.Cmd(func() tea.Msg {
 		return commandExecutedMsg{
@@ -718,6 +735,26 @@ func (m *AppModel) showCommandHistory() tea.Cmd {
 			duration: 0,
 		}
 	})
+}
+
+// changeTheme attempts to load and apply a new visual theme.
+func (m *AppModel) changeTheme(themeName string) tea.Cmd {
+	if themeName == "" {
+		return m.showError("Usage: /theme <theme_name>")
+	}
+
+	theme, err := m.configManager.LoadTheme(themeName)
+	if err != nil {
+		return m.showError(fmt.Sprintf("Failed to load theme '%s': %v", themeName, err))
+	}
+
+	m.theme = theme
+	m.statusMessage = fmt.Sprintf("Theme changed to '%s'", themeName)
+
+	// Re-render history with the new theme
+	m.reRenderHistory()
+
+	return nil
 }
 
 // showError creates a command to display error messages
@@ -798,11 +835,29 @@ func (m *AppModel) clearStatus() {
 	}
 }
 
+// reRenderHistory re-renders all history entries, which is useful after a state change like a new theme.
+func (m *AppModel) reRenderHistory() {
+	// Create a new slice for updated history to avoid modifying while iterating
+	newHistory := make([]HistoryEntry, len(m.commandHistory))
+	copy(newHistory, m.commandHistory)
+
+	for i, entry := range newHistory {
+		if entry.Response != nil {
+			// Re-render the content part of the response
+			rendered, err := m.contentRenderer.RenderContent(entry.Response.Response.Content, m.theme)
+			if err == nil {
+				newHistory[i].Rendered = rendered
+			}
+		}
+	}
+	m.commandHistory = newHistory
+	m.updateCollapsibleElementsFromHistory()
+}
+
+// updateCollapsibleElementsFromHistory rebuilds the collapsible element list from the entire history.
 func (m *AppModel) updateCollapsibleElementsFromHistory() {
 	m.collapsibleElements = []CollapsibleElement{}
 	for _, entry := range m.commandHistory {
-		// Since updateCollapsibleElements is also a method on AppModel,
-		// we can call it directly.
 		m.updateCollapsibleElements(entry.Rendered)
 	}
 }

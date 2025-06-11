@@ -777,16 +777,3 @@ func (m *AppModel) refreshConnection() tea.Cmd {
 		}
 	})
 }
-
-// reRenderHistory re-renders all history entries to reflect state changes (e.g., toggled sections).
-func (m *AppModel) reRenderHistory() {
-	for i, entry := range m.commandHistory {
-		if entry.Response != nil {
-			rendered, err := m.contentRenderer.RenderContent(entry.Response.Response.Content, m.theme)
-			if err == nil {
-				m.commandHistory[i].Rendered = rendered
-			}
-		}
-	}
-	m.updateCollapsibleElementsFromHistory()
-}
