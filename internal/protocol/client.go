@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -40,16 +42,24 @@ func NewClient(configManager interfaces.ConfigManager, authManager interfaces.Au
 		return nil, fmt.Errorf("authManager cannot be nil")
 	}
 
-	// Configure HTTP client with appropriate timeouts and security settings
+	// Configure a robust, production-ready HTTP transport.
+	// This is the key fix to prevent connection hangs.
+	transport := &http.Transport{
+		// This sets a specific, short timeout for establishing the TCP connection.
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second, // Fast connection timeout
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        10,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second, // Good practice, though not used for http
+		MaxIdleConnsPerHost: 2,
+	}
+
+	// Configure HTTP client with the robust transport and an overall request timeout.
 	httpClient := &http.Client{
-		Timeout: DefaultRequestTimeout,
-		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			IdleConnTimeout:     30 * time.Second,
-			DisableCompression:  false,
-			DisableKeepAlives:   false,
-			MaxIdleConnsPerHost: 2,
-		},
+		Timeout:   DefaultRequestTimeout, // Overall timeout for the entire request
+		Transport: transport,
 	}
 
 	// Generate session ID for request tracking
@@ -97,6 +107,8 @@ func (c *Client) Connect(ctx context.Context, host string, auth *interfaces.Auth
 	if err != nil {
 		return nil, c.wrapConnectionError("failed to create handshake request", err)
 	}
+
+	log.Printf("CLIENT: Sending handshake request to %s", handshakeURL)
 
 	// Execute handshake request
 	startTime := time.Now()

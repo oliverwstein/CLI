@@ -53,16 +53,6 @@ func (m *MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.updateHealth())
 		}
 		cmds = append(cmds, tick())
-
-	case ConnectionResultMsg:
-		m.isConnecting = false
-		if msg.Err != nil {
-			m.err = msg.Err
-			m.statusMessage = ""
-			return m, nil
-		}
-		return m, func() tea.Msg { return msg }
-
 	// This case is necessary if we are not handling character input inside the KeyMsg case
 	// for the text input. We let the default bubble tea update handle non-key messages.
 	default:
