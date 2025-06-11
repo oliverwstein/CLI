@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -11,7 +12,14 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/universal-console/console/internal/app"
+	"github.com/universal-console/console/internal/auth"
+	"github.com/universal-console/console/internal/config"
+	"github.com/universal-console/console/internal/content"
 	"github.com/universal-console/console/internal/interfaces"
+	"github.com/universal-console/console/internal/protocol"
+	"github.com/universal-console/console/internal/registry"
+	app_ui "github.com/universal-console/console/internal/ui/app"
 )
 
 // Version information for the Universal Application Console
@@ -88,13 +96,13 @@ func validateArguments(args CommandLineArgs) error {
 }
 
 // determineProfile resolves which profile to use based on command-line arguments
-func (app *ConsoleApp) determineProfile() (*interfaces.Profile, error) {
+func (ca *ConsoleApp) determineProfile() (*interfaces.Profile, error) {
 	// If host is explicitly specified, create a temporary profile
-	if app.args.Host != "" {
+	if ca.args.Host != "" {
 		profile := &interfaces.Profile{
 			Name:          "temporary",
-			Host:          app.args.Host,
-			Theme:         app.args.Theme,
+			Host:          ca.args.Host,
+			Theme:         ca.args.Theme,
 			Confirmations: true,
 			Auth: interfaces.AuthConfig{
 				Type: "none",
@@ -102,27 +110,27 @@ func (app *ConsoleApp) determineProfile() (*interfaces.Profile, error) {
 		}
 
 		// Apply theme override if specified
-		if app.args.Theme != "" {
-			profile.Theme = app.args.Theme
+		if ca.args.Theme != "" {
+			profile.Theme = ca.args.Theme
 		}
 
 		return profile, nil
 	}
 
 	// Use specified profile or default to "default"
-	profileName := app.args.Profile
+	profileName := ca.args.Profile
 	if profileName == "" {
 		profileName = "default"
 	}
 
-	profile, err := app.configManager.LoadProfile(profileName)
+	profile, err := ca.configManager.LoadProfile(profileName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load profile '%s': %w", profileName, err)
 	}
 
 	// Apply theme override if specified
-	if app.args.Theme != "" {
-		profile.Theme = app.args.Theme
+	if ca.args.Theme != "" {
+		profile.Theme = ca.args.Theme
 	}
 
 	return profile, nil
@@ -130,40 +138,44 @@ func (app *ConsoleApp) determineProfile() (*interfaces.Profile, error) {
 
 // shouldLaunchDirectConnection determines if the application should connect directly
 // to an application instead of showing the Console Menu
-func (app *ConsoleApp) shouldLaunchDirectConnection() bool {
-	return app.args.Host != "" || app.args.Profile != ""
+func (ca *ConsoleApp) shouldLaunchDirectConnection() bool {
+	return ca.args.Host != "" || ca.args.Profile != ""
 }
 
 // createBubbleTeaProgram instantiates the appropriate Bubble Tea model based on mode
-func (app *ConsoleApp) createBubbleTeaProgram() (*tea.Program, error) {
-	if app.shouldLaunchDirectConnection() {
+func (ca *ConsoleApp) createBubbleTeaProgram() (*tea.Program, error) {
+	if ca.shouldLaunchDirectConnection() {
 		// Direct connection mode - launch Application Mode immediately
-		profile, err := app.determineProfile()
+		profile, err := ca.determineProfile()
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine connection profile: %w", err)
 		}
 
-		// TODO: Create Application Mode model with injected dependencies
-		// This will be implemented in Phase 8
-		model := createApplicationModel(
+		// Connect immediately
+		_, err = ca.protocolClient.Connect(context.Background(), profile.Host, &profile.Auth)
+		if err != nil {
+			// Log the error but continue, the app model will handle showing the error
+			log.Printf("Direct connection failed: %v", err)
+		}
+
+		// Create the Application Mode model directly
+		model := app_ui.NewAppModel(
 			profile,
-			app.protocolClient,
-			app.contentRenderer,
-			app.configManager,
-			app.authManager,
+			ca.protocolClient,
+			ca.contentRenderer,
+			ca.configManager,
+			ca.authManager,
 		)
 
 		return tea.NewProgram(model, tea.WithAltScreen()), nil
 	} else {
-		// Console Menu Mode - show application registry and connection management
-		// TODO: Create Console Menu Mode model with injected dependencies
-		// This will be implemented in Phase 7
-		model := createMenuModel(
-			app.registryManager,
-			app.configManager,
-			app.protocolClient,
-			app.contentRenderer,
-			app.authManager,
+		// Console Menu Mode - use the main controller
+		model := app.NewConsoleController(
+			ca.registryManager,
+			ca.configManager,
+			ca.protocolClient,
+			ca.contentRenderer,
+			ca.authManager,
 		)
 
 		return tea.NewProgram(model, tea.WithAltScreen()), nil
@@ -171,7 +183,6 @@ func (app *ConsoleApp) createBubbleTeaProgram() (*tea.Program, error) {
 }
 
 // createConcreteImplementations instantiates all concrete implementations of interfaces
-// This function will be expanded as concrete implementations are developed in subsequent phases
 func createConcreteImplementations() (
 	interfaces.ConfigManager,
 	interfaces.ProtocolClient,
@@ -180,50 +191,37 @@ func createConcreteImplementations() (
 	interfaces.AuthManager,
 	error,
 ) {
-	// TODO: Implement concrete implementations in subsequent phases
-	// For now, return placeholder implementations that will be replaced
-
 	// Phase 2: Configuration Management Implementation
-	// configManager := config.NewManager()
-
-	// Phase 3: Protocol Communication Layer
-	// protocolClient := protocol.NewClient()
+	configManager, err := config.NewManager()
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init config manager: %w", err)
+	}
 
 	// Phase 4: Authentication and Security Implementation
-	// authManager := auth.NewManager()
+	authManager, err := auth.NewManager(configManager)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init auth manager: %w", err)
+	}
+
+	// Phase 3: Protocol Communication Layer
+	protocolClient, err := protocol.NewClient(configManager, authManager)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init protocol client: %w", err)
+	}
 
 	// Phase 5: Rich Content Rendering System
-	// contentRenderer := content.NewRenderer()
+	contentRenderer, err := content.NewRenderer()
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init content renderer: %w", err)
+	}
 
 	// Phase 6: Application Registration and Health Monitoring
-	// registryManager := registry.NewManager()
+	registryManager, err := registry.NewManager(configManager, protocolClient)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init registry manager: %w", err)
+	}
 
-	return nil, nil, nil, nil, nil, fmt.Errorf("concrete implementations not yet available - will be implemented in subsequent phases")
-}
-
-// Placeholder model creation functions for future implementation
-// These will be properly implemented in Phases 7 and 8
-
-func createApplicationModel(
-	profile *interfaces.Profile,
-	client interfaces.ProtocolClient,
-	renderer interfaces.ContentRenderer,
-	config interfaces.ConfigManager,
-	auth interfaces.AuthManager,
-) tea.Model {
-	// TODO: Implement in Phase 8 - Application Mode Implementation
-	panic("createApplicationModel not yet implemented")
-}
-
-func createMenuModel(
-	registry interfaces.RegistryManager,
-	config interfaces.ConfigManager,
-	client interfaces.ProtocolClient,
-	renderer interfaces.ContentRenderer,
-	auth interfaces.AuthManager,
-) tea.Model {
-	// TODO: Implement in Phase 7 - Console Menu Mode Implementation
-	panic("createMenuModel not yet implemented")
+	return configManager, protocolClient, contentRenderer, registryManager, authManager, nil
 }
 
 // main implements the application entry point with comprehensive argument handling
@@ -256,13 +254,11 @@ func main() {
 	configManager, protocolClient, contentRenderer, registryManager, authManager, err := createConcreteImplementations()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing application components: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Note: This error is expected during Phase 1 implementation.\n")
-		fmt.Fprintf(os.Stderr, "Concrete implementations will be available in subsequent phases.\n")
 		os.Exit(1)
 	}
 
 	// Create the main application instance with dependency injection
-	app := &ConsoleApp{
+	consoleApp := &ConsoleApp{
 		configManager:   configManager,
 		protocolClient:  protocolClient,
 		contentRenderer: contentRenderer,
@@ -272,7 +268,7 @@ func main() {
 	}
 
 	// Create and start the appropriate Bubble Tea program
-	program, err := app.createBubbleTeaProgram()
+	program, err := consoleApp.createBubbleTeaProgram()
 	if err != nil {
 		log.Fatalf("Failed to create application interface: %v", err)
 	}
