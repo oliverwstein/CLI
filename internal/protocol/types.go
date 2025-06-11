@@ -126,15 +126,15 @@ type ErrorResponseInternal struct {
 
 // ConnectionState represents the current state of the protocol client connection
 type ConnectionState struct {
-	Connected     bool                 `json:"connected"`
-	Host          string               `json:"host"`
-	AppName       string               `json:"appName,omitempty"`
-	AppVersion    string               `json:"appVersion,omitempty"`
-	LastHandshake time.Time            `json:"lastHandshake,omitempty"`
-	Features      map[string]bool      `json:"features,omitempty"`
-	AuthType      string               `json:"authType,omitempty"`
-	LastError     *ProtocolError       `json:"lastError,omitempty"`
-	Statistics    ConnectionStatistics `json:"statistics"`
+	Connected     bool                   `json:"connected"`
+	Host          string                 `json:"host"`
+	AppName       string                 `json:"appName,omitempty"`
+	AppVersion    string                 `json:"appVersion,omitempty"`
+	LastHandshake time.Time              `json:"lastHandshake,omitempty"`
+	Features      map[string]bool        `json:"features,omitempty"`
+	Auth          *interfaces.AuthConfig `json:"-"` // Add this field to store current auth config
+	LastError     *ProtocolError         `json:"lastError,omitempty"`
+	Statistics    ConnectionStatistics   `json:"statistics"`
 }
 
 // ConnectionStatistics tracks communication metrics for monitoring and debugging
