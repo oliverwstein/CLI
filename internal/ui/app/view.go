@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/universal-console/console/internal/interfaces"
+	"github.com/universal-console/console/internal/ui/components"
 )
 
 // Styling definitions for sophisticated visual presentation
@@ -58,63 +59,6 @@ var (
 				MarginLeft(2).
 				Foreground(lipgloss.Color("#CDD6F4"))
 
-	// Actions pane styling with different themes for action types
-	actionsPaneStyle = lipgloss.NewStyle().
-				Border(lipgloss.NormalBorder()).
-				BorderForeground(lipgloss.Color("#FAB387")).
-				Padding(1).
-				MarginTop(1)
-
-	actionsPaneTitleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("#FAB387"))
-
-	// Action item styling for different types
-	actionPrimaryStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#89B4FA")).
-				Padding(0, 1)
-
-	actionPrimaryFocusedStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#FFFFFF")).
-					Background(lipgloss.Color("#89B4FA")).
-					Padding(0, 1)
-
-	actionConfirmationStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#A6E3A1")).
-				Padding(0, 1)
-
-	actionConfirmationFocusedStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#FFFFFF")).
-					Background(lipgloss.Color("#A6E3A1")).
-					Padding(0, 1)
-
-	actionCancelStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#F38BA8")).
-				Padding(0, 1)
-
-	actionCancelFocusedStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#FFFFFF")).
-					Background(lipgloss.Color("#F38BA8")).
-					Padding(0, 1)
-
-	actionInfoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#94E2D5")).
-			Padding(0, 1)
-
-	actionInfoFocusedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#181825")).
-				Background(lipgloss.Color("#94E2D5")).
-				Padding(0, 1)
-
-	actionAlternativeStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#CBA6F7")).
-				Padding(0, 1)
-
-	actionAlternativeFocusedStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#FFFFFF")).
-					Background(lipgloss.Color("#CBA6F7")).
-					Padding(0, 1)
-
 	// Input component styling with focus indication
 	inputStyle = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
@@ -133,18 +77,6 @@ var (
 			Foreground(lipgloss.Color("#A6E3A1")).
 			Italic(true)
 
-	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F38BA8")).
-			Bold(true)
-
-	// Workflow breadcrumb styling
-	workflowStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#CBA6F7")).
-			Foreground(lipgloss.Color("#CBA6F7")).
-			Padding(0, 2).
-			MarginBottom(1)
-
 	// Connection status indicator styling
 	connectedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#A6E3A1")).
@@ -157,8 +89,9 @@ var (
 
 // View implements the tea.Model interface to render the complete Application Mode interface
 func (m *AppModel) View() string {
-	// Calculate layout dimensions
-	m.calculateLayoutDimensions()
+	// Set component widths before calculating layout
+	m.actionsPane.SetWidth(m.terminalWidth)
+	m.workflowManager.SetWidth(m.terminalWidth)
 
 	var sections []string
 
@@ -166,16 +99,16 @@ func (m *AppModel) View() string {
 	sections = append(sections, m.renderHeader())
 
 	// Render workflow breadcrumbs if present
-	if workflowSection := m.renderWorkflowBreadcrumbs(); workflowSection != "" {
-		sections = append(sections, workflowSection)
+	if m.workflowManager.IsActive() {
+		sections = append(sections, m.workflowManager.View())
 	}
 
 	// Render main content history pane
 	sections = append(sections, m.renderHistoryPane())
 
 	// Render actions pane if actions are available
-	if actionSection := m.renderActionsPane(); actionSection != "" {
-		sections = append(sections, actionSection)
+	if m.actionsPane.IsVisible() {
+		sections = append(sections, m.actionsPane.View())
 	}
 
 	// Render input component
@@ -187,24 +120,6 @@ func (m *AppModel) View() string {
 	}
 
 	return strings.Join(sections, "\n")
-}
-
-// calculateLayoutDimensions computes the available space for each interface section
-func (m *AppModel) calculateLayoutDimensions() {
-	if m.terminalWidth > 0 && m.terminalHeight > 0 {
-		// Calculate available height for history pane
-		usedHeight := m.headerHeight + m.inputHeight + m.actionsHeight + 2 // +2 for spacing
-		if m.currentWorkflow != nil {
-			usedHeight += 3 // Workflow breadcrumbs
-		}
-
-		availableHeight := m.terminalHeight - usedHeight
-		if availableHeight < 5 {
-			availableHeight = 5 // Minimum height
-		}
-
-		m.maxDisplayLines = availableHeight
-	}
 }
 
 // renderHeader creates the application header with connection status and metadata
@@ -240,63 +155,51 @@ func (m *AppModel) renderHeader() string {
 	return headerStyle.Width(m.terminalWidth).Render(headerText)
 }
 
-// renderWorkflowBreadcrumbs creates workflow progress indication
-func (m *AppModel) renderWorkflowBreadcrumbs() string {
-	if m.currentWorkflow == nil {
-		return ""
-	}
-
-	breadcrumbText := fmt.Sprintf("%s (%d/%d)",
-		m.currentWorkflow.Title,
-		m.currentWorkflow.Step,
-		m.currentWorkflow.TotalSteps)
-
-	// Add progress bar
-	progressBar := m.createProgressBar(m.currentWorkflow.Step, m.currentWorkflow.TotalSteps, 20)
-	breadcrumbText += " " + progressBar
-
-	return workflowStyle.Render(breadcrumbText)
-}
-
 // renderHistoryPane creates the scrolling content area with command history and responses
 func (m *AppModel) renderHistoryPane() string {
+	var height int
+	if m.terminalHeight > 0 {
+		actionsHeight := lipgloss.Height(m.actionsPane.View())
+		workflowHeight := lipgloss.Height(m.workflowManager.View())
+		usedHeight := m.headerHeight + m.inputHeight + actionsHeight + workflowHeight + 2
+		height = m.terminalHeight - usedHeight
+		if height < 5 {
+			height = 5
+		}
+	} else {
+		height = 20 // Default height
+	}
+
 	if len(m.commandHistory) == 0 {
 		emptyMessage := "Connected and ready. Type a command to get started."
 		return historyPaneStyle.
-			Height(m.maxDisplayLines).
+			Height(height).
 			Width(m.terminalWidth - 4).
 			Render(statusStyle.Render(emptyMessage))
 	}
 
 	var contentLines []string
 
-	// Render visible portion of command history
-	startIndex := 0
-	if len(m.commandHistory) > m.maxDisplayLines/3 { // Allow ~3 lines per entry
-		startIndex = len(m.commandHistory) - (m.maxDisplayLines / 3)
-	}
-
-	for i := startIndex; i < len(m.commandHistory); i++ {
-		entry := m.commandHistory[i]
+	for _, entry := range m.commandHistory {
 		contentLines = append(contentLines, m.renderHistoryEntry(entry)...)
 	}
 
 	// Apply scrolling offset
 	if m.scrollOffset > 0 && m.scrollOffset < len(contentLines) {
-		endIndex := m.scrollOffset + m.maxDisplayLines
+		endIndex := m.scrollOffset + height
 		if endIndex > len(contentLines) {
 			endIndex = len(contentLines)
 		}
 		contentLines = contentLines[m.scrollOffset:endIndex]
-	} else if len(contentLines) > m.maxDisplayLines {
+	} else if len(contentLines) > height {
 		// Show most recent content
-		contentLines = contentLines[len(contentLines)-m.maxDisplayLines:]
+		contentLines = contentLines[len(contentLines)-height:]
 	}
 
 	content := strings.Join(contentLines, "\n")
 
 	return historyPaneStyle.
-		Height(m.maxDisplayLines).
+		Height(height).
 		Width(m.terminalWidth - 4).
 		Render(content)
 }
@@ -322,7 +225,7 @@ func (m *AppModel) renderHistoryEntry(entry HistoryEntry) []string {
 		if m.showTimestamps {
 			responsePrefix = fmt.Sprintf("[%s] APP>", entry.Timestamp.Format("15:04:05"))
 		}
-		errorLine := appResponseStyle.Render(responsePrefix) + " " + errorStyle.Render("Error: "+entry.Error)
+		errorLine := appResponseStyle.Render(responsePrefix) + " " + components.RenderStatus("error", entry.Error)
 		lines = append(lines, errorLine)
 	} else if entry.Response != nil {
 		// Successful response
@@ -424,105 +327,12 @@ func (m *AppModel) renderCollapsibleContent(content interfaces.RenderedContent) 
 	return lines
 }
 
-// renderActionsPane creates the numbered actions interface
-func (m *AppModel) renderActionsPane() string {
-	if !m.actionsVisible || len(m.currentActions) == 0 {
-		return ""
-	}
-
-	var actionLines []string
-
-	// Determine actions pane title based on action types
-	paneTitle := "Available Actions"
-	if m.hasConfirmationActions() {
-		paneTitle = "Confirmation Required"
-	} else if m.hasErrorActions() {
-		paneTitle = "Error Recovery Options"
-	}
-
-	// Render action items
-	for i, action := range m.currentActions {
-		actionLine := m.renderActionItem(i, action)
-		actionLines = append(actionLines, actionLine)
-	}
-
-	styledTitle := actionsPaneTitleStyle.Render(paneTitle)
-	separatorWidth := m.terminalWidth - lipgloss.Width(styledTitle) - 6
-	if separatorWidth < 0 {
-		separatorWidth = 0
-	}
-
-	// Create bordered actions pane with title
-	titledPane := fmt.Sprintf("┌─ %s %s┐\n│ %s │\n└%s┘",
-		styledTitle,
-		strings.Repeat("─", separatorWidth),
-		strings.Join(actionLines, " │\n│ "),
-		strings.Repeat("─", m.terminalWidth-2))
-
-	return actionsPaneStyle.Width(m.terminalWidth - 4).Render(titledPane)
-}
-
-// renderActionItem creates a single numbered action with appropriate styling
-func (m *AppModel) renderActionItem(index int, action interfaces.Action) string {
-	number := fmt.Sprintf("[%d]", index+1)
-	icon := action.Icon
-	if icon == "" {
-		// Default icons for action types
-		switch action.Type {
-		case "confirmation":
-			icon = "✅"
-		case "cancel":
-			icon = "❌"
-		case "info":
-			icon = "📋"
-		case "alternative":
-			icon = "🔄"
-		default:
-			icon = "▶"
-		}
-	}
-
-	actionText := fmt.Sprintf("%s %s %s", number, icon, action.Name)
-
-	// Apply styling based on action type and focus state
-	isFocused := m.focusState == FocusActions && m.selectedActionIndex == index
-
-	switch action.Type {
-	case "confirmation":
-		if isFocused {
-			return actionConfirmationFocusedStyle.Render(actionText)
-		}
-		return actionConfirmationStyle.Render(actionText)
-
-	case "cancel":
-		if isFocused {
-			return actionCancelFocusedStyle.Render(actionText)
-		}
-		return actionCancelStyle.Render(actionText)
-
-	case "info":
-		if isFocused {
-			return actionInfoFocusedStyle.Render(actionText)
-		}
-		return actionInfoStyle.Render(actionText)
-
-	case "alternative":
-		if isFocused {
-			return actionAlternativeFocusedStyle.Render(actionText)
-		}
-		return actionAlternativeStyle.Render(actionText)
-
-	default:
-		if isFocused {
-			return actionPrimaryFocusedStyle.Render(actionText)
-		}
-		return actionPrimaryStyle.Render(actionText)
-	}
-}
-
 // renderInputComponent creates the command input interface
 func (m *AppModel) renderInputComponent() string {
 	inputWidth := m.terminalWidth - 6
+	if inputWidth < 10 {
+		inputWidth = 10
+	}
 
 	var inputBox string
 	if m.focusState == FocusInput {
@@ -535,7 +345,7 @@ func (m *AppModel) renderInputComponent() string {
 	var hints []string
 	if m.focusState == FocusInput {
 		hints = append(hints, "Ctrl+↑/↓ for history")
-		if len(m.currentActions) > 0 {
+		if m.actionsPane.IsVisible() {
 			hints = append(hints, "1-9 for quick actions")
 		}
 		hints = append(hints, "Tab to navigate")
@@ -556,19 +366,12 @@ func (m *AppModel) renderStatusSection() string {
 
 	// Render error messages
 	if m.errorMessage != "" {
-		statusLines = append(statusLines, errorStyle.Render("Error: "+m.errorMessage))
+		statusLines = append(statusLines, components.RenderStatus("error", m.errorMessage))
 	}
 
 	// Render status messages
 	if m.statusMessage != "" {
-		statusLines = append(statusLines, statusStyle.Render(m.statusMessage))
-	}
-
-	// Render action execution status
-	if m.actionExecuting {
-		statusLines = append(statusLines, statusStyle.Render("⏳ Executing action..."))
-	} else if m.lastActionResult != "" {
-		statusLines = append(statusLines, statusStyle.Render(m.lastActionResult))
+		statusLines = append(statusLines, components.RenderStatus("info", m.statusMessage))
 	}
 
 	// Render connection statistics if enabled
@@ -577,7 +380,7 @@ func (m *AppModel) renderStatusSection() string {
 			m.connectionStats.SuccessfulCommands,
 			m.connectionStats.TotalCommands,
 			m.connectionStats.AverageResponseTime.Truncate(time.Millisecond))
-		statusLines = append(statusLines, statusStyle.Render(statsText))
+		statusLines = append(statusLines, components.RenderStatus("info", statsText))
 	}
 
 	if len(statusLines) > 0 {
@@ -585,41 +388,4 @@ func (m *AppModel) renderStatusSection() string {
 	}
 
 	return ""
-}
-
-// Helper methods for rendering logic
-
-// hasConfirmationActions checks if any actions require confirmation
-func (m *AppModel) hasConfirmationActions() bool {
-	for _, action := range m.currentActions {
-		if action.Type == "confirmation" {
-			return true
-		}
-	}
-	return false
-}
-
-// hasErrorActions checks if any actions are for error recovery
-func (m *AppModel) hasErrorActions() bool {
-	for _, action := range m.currentActions {
-		if action.Type == "cancel" || action.Type == "alternative" {
-			return true
-		}
-	}
-	return false
-}
-
-// createProgressBar creates a visual progress indicator
-func (m *AppModel) createProgressBar(current, total, width int) string {
-	if total <= 0 {
-		return ""
-	}
-
-	filled := int(float64(current) / float64(total) * float64(width))
-	if filled > width {
-		filled = width
-	}
-
-	progress := strings.Repeat("●", filled) + strings.Repeat("○", width-filled)
-	return progress
 }

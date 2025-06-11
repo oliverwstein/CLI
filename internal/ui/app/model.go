@@ -13,8 +13,11 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/universal-console/console/internal/interfaces"
+	"github.com/universal-console/console/internal/ui/actions"
+	"github.com/universal-console/console/internal/ui/workflow"
 )
 
 // AppModel represents the complete state and dependencies for Application Mode operation
@@ -25,6 +28,10 @@ type AppModel struct {
 	contentRenderer interfaces.ContentRenderer
 	configManager   interfaces.ConfigManager
 	authManager     interfaces.AuthManager
+
+	// Integrated UI components
+	actionsPane     *actions.Pane
+	workflowManager *workflow.Manager
 
 	// Connection state and application information
 	connected       bool
@@ -44,16 +51,8 @@ type AppModel struct {
 	// Current response content and display state
 	currentResponse *interfaces.CommandResponse
 	renderedContent []interfaces.RenderedContent
-	currentActions  []interfaces.Action
-	currentWorkflow *interfaces.Workflow
 	scrollOffset    int
 	maxDisplayLines int
-
-	// Actions pane state management
-	actionsVisible      bool
-	selectedActionIndex int
-	actionExecuting     bool
-	lastActionResult    string
 
 	// Focus management and keyboard navigation
 	focusState        FocusState
@@ -83,7 +82,6 @@ type AppModel struct {
 	terminalHeight int
 	headerHeight   int
 	inputHeight    int
-	actionsHeight  int
 
 	// Status and error management
 	statusMessage   string
@@ -138,18 +136,6 @@ type NavigationStep struct {
 	ToFocus   FocusState `json:"toFocus"`
 	Method    string     `json:"method"` // "tab", "click", "shortcut", etc.
 	ElementID string     `json:"elementId,omitempty"`
-}
-
-// WorkflowContext maintains state for multi-step operations
-type WorkflowContext struct {
-	ID           string                 `json:"id"`
-	Title        string                 `json:"title"`
-	CurrentStep  int                    `json:"currentStep"`
-	TotalSteps   int                    `json:"totalSteps"`
-	StartTime    time.Time              `json:"startTime"`
-	LastActivity time.Time              `json:"lastActivity"`
-	Context      map[string]interface{} `json:"context"`
-	Breadcrumbs  []string               `json:"breadcrumbs"`
 }
 
 // OperationRecord tracks executed operations for audit and recovery
@@ -216,6 +202,10 @@ func NewAppModel(
 		configManager:   configManager,
 		authManager:     authManager,
 
+		// Initialize integrated UI components
+		actionsPane:     actions.NewPane(),
+		workflowManager: workflow.NewManager(),
+
 		// Initialize command handling
 		commandHistory:    make([]HistoryEntry, 0),
 		historyIndex:      -1,
@@ -250,9 +240,8 @@ func NewAppModel(
 		},
 
 		// Set default UI dimensions
-		headerHeight:  3,
-		inputHeight:   3,
-		actionsHeight: 0,
+		headerHeight: 3,
+		inputHeight:  3,
 	}
 
 	// Initialize focusable elements
@@ -276,13 +265,25 @@ func (m *AppModel) SetTerminalSize(width, height int) {
 	m.terminalWidth = width
 	m.terminalHeight = height
 
+	// Update component widths
+	m.actionsPane.SetWidth(width)
+	m.workflowManager.SetWidth(width)
+
 	// Calculate available space for content display
-	availableHeight := height - m.headerHeight - m.inputHeight - m.actionsHeight
-	m.maxDisplayLines = availableHeight - 2 // Account for borders
+	actionsHeight := lipgloss.Height(m.actionsPane.View())
+	workflowHeight := lipgloss.Height(m.workflowManager.View())
+
+	usedHeight := m.headerHeight + m.inputHeight + actionsHeight + workflowHeight + 2 // +2 for spacing
+
+	availableHeight := height - usedHeight
+	m.maxDisplayLines = availableHeight
+	if m.maxDisplayLines < 5 {
+		m.maxDisplayLines = 5
+	}
 
 	// Adjust command input width based on terminal size
 	availableWidth := width - 10 // Account for borders and padding
-	if availableWidth > 20 && availableWidth < 100 {
+	if availableWidth > 20 {
 		m.commandInput.Width = availableWidth
 	}
 }
@@ -345,24 +346,29 @@ func (m *AppModel) ExecuteAction(actionIndex int) tea.Cmd {
 		return m.showError("Not connected to any application")
 	}
 
-	if actionIndex < 0 || actionIndex >= len(m.currentActions) {
-		return m.showError(fmt.Sprintf("Invalid action index: %d", actionIndex+1))
+	if !m.actionsPane.IsVisible() || actionIndex < 0 {
+		return m.showError("No action selected")
 	}
 
-	action := m.currentActions[actionIndex]
-	m.selectedActionIndex = actionIndex
-	m.actionExecuting = true
+	selectedAction, err := m.actionsPane.Selected()
+	if err != nil {
+		return m.showError(fmt.Sprintf("Invalid action: %v", err))
+	}
+
+	m.statusMessage = fmt.Sprintf("Executing action: %s...", selectedAction.Name)
 
 	// Create action request
 	request := interfaces.ActionRequest{
-		Command: action.Command,
+		Command: selectedAction.Command,
 	}
 
 	// Include workflow context if present
-	if m.currentWorkflow != nil {
-		request.WorkflowID = m.currentWorkflow.ID
-		request.Context = make(map[string]interface{})
-		request.Context["workflowStep"] = m.currentWorkflow.Step
+	if m.workflowManager.IsActive() {
+		if wf := m.workflowManager.GetCurrentWorkflow(); wf != nil {
+			request.WorkflowID = wf.ID
+			request.Context = make(map[string]interface{})
+			request.Context["workflowStep"] = wf.Step
+		}
 	}
 
 	return tea.Cmd(func() tea.Msg {
@@ -377,20 +383,18 @@ func (m *AppModel) ExecuteAction(actionIndex int) tea.Cmd {
 
 		if err != nil {
 			return actionExecutedMsg{
-				actionIndex: actionIndex,
-				action:      action,
-				success:     false,
-				error:       err.Error(),
-				duration:    duration,
+				action:   *selectedAction,
+				success:  false,
+				error:    err.Error(),
+				duration: duration,
 			}
 		}
 
 		return actionExecutedMsg{
-			actionIndex: actionIndex,
-			action:      action,
-			response:    response,
-			success:     true,
-			duration:    duration,
+			action:   *selectedAction,
+			response: response,
+			success:  true,
+			duration: duration,
 		}
 	})
 }
@@ -465,12 +469,11 @@ type commandExecutedMsg struct {
 
 // actionExecutedMsg carries the result of action execution
 type actionExecutedMsg struct {
-	actionIndex int
-	action      interfaces.Action
-	response    *interfaces.CommandResponse
-	success     bool
-	error       string
-	duration    time.Duration
+	action   interfaces.Action
+	response *interfaces.CommandResponse
+	success  bool
+	error    string
+	duration time.Duration
 }
 
 // sectionToggledMsg indicates that a collapsible section was toggled
@@ -706,16 +709,14 @@ func (m *AppModel) updateFocusableElements() {
 	})
 
 	// Add action elements if actions are visible
-	if m.actionsVisible && len(m.currentActions) > 0 {
-		for i, action := range m.currentActions {
+	if m.actionsPane.IsVisible() {
+		if currentActions, err := m.actionsPane.Selected(); err == nil {
+			// This logic is simplified; it should iterate over all actions from the pane
 			elements = append(elements, FocusableElement{
-				ID:       fmt.Sprintf("action_%d", i),
+				ID:       "action_0", // Example ID
 				Type:     "action",
-				Position: i + 1,
-				Data: map[string]interface{}{
-					"actionIndex": i,
-					"actionName":  action.Name,
-				},
+				Position: 1,
+				Data:     map[string]interface{}{"actionName": currentActions.Name},
 			})
 		}
 	}

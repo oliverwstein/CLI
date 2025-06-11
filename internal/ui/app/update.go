@@ -150,10 +150,12 @@ func (m *AppModel) handleInputKeys(msg tea.KeyMsg) tea.Cmd {
 func (m *AppModel) handleActionsKeys(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "up", "k":
-		return m.navigateActions(-1)
+		m.actionsPane.Previous()
+		return nil
 
 	case "down", "j":
-		return m.navigateActions(1)
+		m.actionsPane.Next()
+		return nil
 
 	case "enter", "space":
 		return m.executeSelectedAction()
@@ -248,9 +250,8 @@ func (m *AppModel) cycleFocusForward() tea.Cmd {
 	// Determine next focus state based on current state and available elements
 	switch m.focusState {
 	case FocusInput:
-		if m.actionsVisible && len(m.currentActions) > 0 {
+		if m.actionsPane.IsVisible() {
 			m.SetFocus(FocusActions)
-			m.selectedActionIndex = 0
 		} else if len(m.collapsibleElements) > 0 {
 			m.SetFocus(FocusExpandable)
 			m.currentFocusIndex = 0
@@ -298,18 +299,16 @@ func (m *AppModel) cycleFocusBackward() tea.Cmd {
 			m.currentFocusIndex = len(m.collapsibleElements) - 1
 		} else if len(m.renderedContent) > 0 {
 			m.SetFocus(FocusContent)
-		} else if m.actionsVisible && len(m.currentActions) > 0 {
+		} else if m.actionsPane.IsVisible() {
 			m.SetFocus(FocusActions)
-			m.selectedActionIndex = len(m.currentActions) - 1
 		}
 
 	case FocusActions:
 		m.SetFocus(FocusInput)
 
 	case FocusContent:
-		if m.actionsVisible && len(m.currentActions) > 0 {
+		if m.actionsPane.IsVisible() {
 			m.SetFocus(FocusActions)
-			m.selectedActionIndex = len(m.currentActions) - 1
 		} else {
 			m.SetFocus(FocusInput)
 		}
@@ -317,9 +316,8 @@ func (m *AppModel) cycleFocusBackward() tea.Cmd {
 	case FocusExpandable:
 		if len(m.renderedContent) > 0 {
 			m.SetFocus(FocusContent)
-		} else if m.actionsVisible && len(m.currentActions) > 0 {
+		} else if m.actionsPane.IsVisible() {
 			m.SetFocus(FocusActions)
-			m.selectedActionIndex = len(m.currentActions) - 1
 		} else {
 			m.SetFocus(FocusInput)
 		}
@@ -372,25 +370,6 @@ func (m *AppModel) navigateInputHistory(direction int) tea.Cmd {
 		m.commandInput.CursorEnd()
 	}
 
-	return nil
-}
-
-// navigateActions moves selection within the actions pane
-func (m *AppModel) navigateActions(direction int) tea.Cmd {
-	if len(m.currentActions) == 0 {
-		return nil
-	}
-
-	newIndex := m.selectedActionIndex + direction
-
-	// Handle wrapping
-	if newIndex < 0 {
-		newIndex = len(m.currentActions) - 1
-	} else if newIndex >= len(m.currentActions) {
-		newIndex = 0
-	}
-
-	m.selectedActionIndex = newIndex
 	return nil
 }
 
@@ -460,21 +439,26 @@ func (m *AppModel) scrollToBottom() tea.Cmd {
 // executeActionByNumber executes an action by its numbered position
 func (m *AppModel) executeActionByNumber(number int) tea.Cmd {
 	index := number - 1 // Convert to zero-based index
-
-	if index >= 0 && index < len(m.currentActions) {
-		m.selectedActionIndex = index
-		return m.ExecuteAction(index)
-	}
-
-	return m.showError(fmt.Sprintf("No action available for number %d", number))
+	return m.ExecuteAction(index)
 }
 
 // executeSelectedAction executes the currently selected action
 func (m *AppModel) executeSelectedAction() tea.Cmd {
-	if m.selectedActionIndex >= 0 && m.selectedActionIndex < len(m.currentActions) {
-		return m.ExecuteAction(m.selectedActionIndex)
+	if !m.actionsPane.IsVisible() {
+		return nil
 	}
-	return nil
+	action, err := m.actionsPane.Selected()
+	if err != nil {
+		return m.showError("No action is selected.")
+	}
+
+	// Find the index of the selected action to pass to ExecuteAction
+	for i, a := range m.currentResponse.Actions {
+		if a.Command == action.Command && a.Name == action.Name {
+			return m.ExecuteAction(i)
+		}
+	}
+	return m.showError("Could not execute selected action.")
 }
 
 // Collapsible section management
@@ -542,16 +526,8 @@ func (m *AppModel) handleCommandExecuted(msg commandExecutedMsg) tea.Cmd {
 
 		// Update current response state
 		m.currentResponse = msg.response
-		m.currentActions = msg.response.Actions
-		m.currentWorkflow = msg.response.Workflow
-		m.actionsVisible = len(msg.response.Actions) > 0
-
-		// Update actions pane height based on number of actions
-		if m.actionsVisible {
-			m.actionsHeight = len(msg.response.Actions) + 2 // +2 for borders
-		} else {
-			m.actionsHeight = 0
-		}
+		m.actionsPane.SetActions(msg.response.Actions)
+		m.workflowManager.UpdateState(msg.response.Workflow)
 
 		// Process response content through content renderer
 		return m.renderResponseContent(msg.response)
@@ -559,9 +535,8 @@ func (m *AppModel) handleCommandExecuted(msg commandExecutedMsg) tea.Cmd {
 		// Handle error case
 		historyEntry.Error = msg.error
 		m.errorMessage = msg.error
-		m.currentActions = nil
-		m.actionsVisible = false
-		m.actionsHeight = 0
+		m.actionsPane.Reset()
+		m.workflowManager.EndWorkflow()
 	}
 
 	// Add to history
@@ -577,7 +552,7 @@ func (m *AppModel) handleCommandExecuted(msg commandExecutedMsg) tea.Cmd {
 
 // handleActionExecuted processes the result of action execution
 func (m *AppModel) handleActionExecuted(msg actionExecutedMsg) tea.Cmd {
-	m.actionExecuting = false
+	m.statusMessage = "" // Clear "Executing action..." message
 
 	// Update connection statistics
 	m.connectionStats.TotalActions++
@@ -595,16 +570,8 @@ func (m *AppModel) handleActionExecuted(msg actionExecutedMsg) tea.Cmd {
 
 		// Update current response state
 		m.currentResponse = msg.response
-		m.currentActions = msg.response.Actions
-		m.currentWorkflow = msg.response.Workflow
-		m.actionsVisible = len(msg.response.Actions) > 0
-
-		// Update actions pane height
-		if m.actionsVisible {
-			m.actionsHeight = len(msg.response.Actions) + 2
-		} else {
-			m.actionsHeight = 0
-		}
+		m.actionsPane.SetActions(msg.response.Actions)
+		m.workflowManager.UpdateState(msg.response.Workflow)
 
 		// Add to history
 		m.addToHistory(historyEntry)
@@ -614,10 +581,7 @@ func (m *AppModel) handleActionExecuted(msg actionExecutedMsg) tea.Cmd {
 	} else {
 		// Handle error case
 		m.errorMessage = msg.error
-		m.lastActionResult = fmt.Sprintf("Action failed: %s", msg.error)
-		m.currentActions = nil
-		m.actionsVisible = false
-		m.actionsHeight = 0
+		m.actionsPane.Reset()
 	}
 
 	return nil
@@ -706,7 +670,7 @@ func (m *AppModel) renderResponseContent(response *interfaces.CommandResponse) t
 			m.renderedContent = m.renderedContent[1000:]
 		}
 
-		return nil
+		return nil // Using nil here, as the update happens in the closure.
 	})
 }
 
