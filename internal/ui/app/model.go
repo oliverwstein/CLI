@@ -7,6 +7,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -15,7 +16,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/universal-console/console/internal/errors"
 	"github.com/universal-console/console/internal/interfaces"
+	"github.com/universal-console/console/internal/protocol"
 	"github.com/universal-console/console/internal/ui/actions"
 	"github.com/universal-console/console/internal/ui/workflow"
 )
@@ -32,6 +35,8 @@ type AppModel struct {
 	// Integrated UI components
 	actionsPane     *actions.Pane
 	workflowManager *workflow.Manager
+	errorHandler    *errors.Handler
+	recoveryManager *errors.RecoveryManager
 
 	// Connection state and application information
 	connected       bool
@@ -85,7 +90,7 @@ type AppModel struct {
 
 	// Status and error management
 	statusMessage   string
-	errorMessage    string
+	currentError    *errors.ProcessedError // Replaces simple errorMessage string
 	lastUpdateTime  time.Time
 	connectionStats ConnectionStatistics
 }
@@ -121,11 +126,11 @@ type CollapsibleElement struct {
 type HistoryEntry struct {
 	Timestamp time.Time                    `json:"timestamp"`
 	Command   string                       `json:"command"`
-	Response  *interfaces.CommandResponse  `json:"response"`
-	Rendered  []interfaces.RenderedContent `json:"rendered"`
-	Actions   []interfaces.Action          `json:"actions"`
-	Workflow  *interfaces.Workflow         `json:"workflow"`
-	Error     string                       `json:"error,omitempty"`
+	Response  *interfaces.CommandResponse  `json:"response,omitempty"`
+	Rendered  []interfaces.RenderedContent `json:"rendered,omitempty"`
+	Actions   []interfaces.Action          `json:"actions,omitempty"`
+	Workflow  *interfaces.Workflow         `json:"workflow,omitempty"`
+	Error     *errors.ProcessedError       `json:"error,omitempty"`
 	Duration  time.Duration                `json:"duration"`
 }
 
@@ -205,6 +210,8 @@ func NewAppModel(
 		// Initialize integrated UI components
 		actionsPane:     actions.NewPane(),
 		workflowManager: workflow.NewManager(),
+		errorHandler:    errors.NewHandler(),
+		recoveryManager: errors.NewRecoveryManager(),
 
 		// Initialize command handling
 		commandHistory:    make([]HistoryEntry, 0),
@@ -299,6 +306,9 @@ func (m *AppModel) ExecuteCommand(command string) tea.Cmd {
 		return nil
 	}
 
+	// Clear previous error/status when a new command is issued
+	m.clearStatus()
+
 	// Check for meta commands
 	if strings.HasPrefix(command, "/") {
 		return m.handleMetaCommand(command)
@@ -323,6 +333,19 @@ func (m *AppModel) ExecuteCommand(command string) tea.Cmd {
 		duration := time.Since(startTime)
 
 		if err != nil {
+			// **FIX:** Check if the returned error is a protocol.ProtocolError and try to extract structured error details.
+			if protoErr, ok := err.(*protocol.ProtocolError); ok && protoErr.HTTPDetails != nil {
+				var structuredErr interfaces.ErrorResponse
+				if json.Unmarshal([]byte(protoErr.HTTPDetails.Body), &structuredErr) == nil {
+					return commandExecutedMsg{
+						command:         command,
+						success:         false,
+						structuredError: &structuredErr,
+						duration:        duration,
+					}
+				}
+			}
+			// Fallback to simple error string if not a structured protocol error.
 			return commandExecutedMsg{
 				command:  command,
 				success:  false,
@@ -355,6 +378,12 @@ func (m *AppModel) ExecuteAction(actionIndex int) tea.Cmd {
 		return m.showError(fmt.Sprintf("Invalid action: %v", err))
 	}
 
+	// Handle special internal "dismiss" action for errors
+	if selectedAction.Command == "internal_dismiss_error" {
+		m.clearStatus()
+		return nil
+	}
+
 	m.statusMessage = fmt.Sprintf("Executing action: %s...", selectedAction.Name)
 
 	// Create action request
@@ -382,6 +411,19 @@ func (m *AppModel) ExecuteAction(actionIndex int) tea.Cmd {
 		duration := time.Since(startTime)
 
 		if err != nil {
+			// **FIX:** Check if the returned error is a protocol.ProtocolError and try to extract structured error details.
+			if protoErr, ok := err.(*protocol.ProtocolError); ok && protoErr.HTTPDetails != nil {
+				var structuredErr interfaces.ErrorResponse
+				if json.Unmarshal([]byte(protoErr.HTTPDetails.Body), &structuredErr) == nil {
+					return actionExecutedMsg{
+						action:          *selectedAction,
+						success:         false,
+						structuredError: &structuredErr,
+						duration:        duration,
+					}
+				}
+			}
+			// Fallback to simple error string.
 			return actionExecutedMsg{
 				action:   *selectedAction,
 				success:  false,
@@ -460,20 +502,22 @@ func (m *AppModel) ToggleSection(sectionID string) tea.Cmd {
 
 // commandExecutedMsg carries the result of command execution
 type commandExecutedMsg struct {
-	command  string
-	response *interfaces.CommandResponse
-	success  bool
-	error    string
-	duration time.Duration
+	command         string
+	response        *interfaces.CommandResponse
+	success         bool
+	error           string
+	structuredError *interfaces.ErrorResponse
+	duration        time.Duration
 }
 
 // actionExecutedMsg carries the result of action execution
 type actionExecutedMsg struct {
-	action   interfaces.Action
-	response *interfaces.CommandResponse
-	success  bool
-	error    string
-	duration time.Duration
+	action          interfaces.Action
+	response        *interfaces.CommandResponse
+	success         bool
+	error           string
+	structuredError *interfaces.ErrorResponse
+	duration        time.Duration
 }
 
 // sectionToggledMsg indicates that a collapsible section was toggled
@@ -737,4 +781,14 @@ func (m *AppModel) updateFocusableElements() {
 	}
 
 	m.focusableElements = elements
+}
+
+// clearStatus resets the error and status message fields.
+func (m *AppModel) clearStatus() {
+	m.statusMessage = ""
+	if m.recoveryManager.IsActive() {
+		m.recoveryManager.EndSession()
+		m.currentError = nil
+		m.actionsPane.Reset()
+	}
 }

@@ -93,33 +93,33 @@ func (m *AppModel) View() string {
 	m.actionsPane.SetWidth(m.terminalWidth)
 	m.workflowManager.SetWidth(m.terminalWidth)
 
-	var sections []string
+	var viewContent []string
 
 	// Render header with connection status and application information
-	sections = append(sections, m.renderHeader())
+	viewContent = append(viewContent, m.renderHeader())
 
 	// Render workflow breadcrumbs if present
 	if m.workflowManager.IsActive() {
-		sections = append(sections, m.workflowManager.View())
+		viewContent = append(viewContent, m.workflowManager.View())
 	}
 
 	// Render main content history pane
-	sections = append(sections, m.renderHistoryPane())
+	viewContent = append(viewContent, m.renderHistoryPane())
 
 	// Render actions pane if actions are available
 	if m.actionsPane.IsVisible() {
-		sections = append(sections, m.actionsPane.View())
+		viewContent = append(viewContent, m.actionsPane.View())
 	}
 
 	// Render input component
-	sections = append(sections, m.renderInputComponent())
+	viewContent = append(viewContent, m.renderInputComponent())
 
 	// Render status messages if present
 	if statusSection := m.renderStatusSection(); statusSection != "" {
-		sections = append(sections, statusSection)
+		viewContent = append(viewContent, statusSection)
 	}
 
-	return strings.Join(sections, "\n")
+	return lipgloss.JoinVertical(lipgloss.Left, viewContent...)
 }
 
 // renderHeader creates the application header with connection status and metadata
@@ -161,7 +161,9 @@ func (m *AppModel) renderHistoryPane() string {
 	if m.terminalHeight > 0 {
 		actionsHeight := lipgloss.Height(m.actionsPane.View())
 		workflowHeight := lipgloss.Height(m.workflowManager.View())
-		usedHeight := m.headerHeight + m.inputHeight + actionsHeight + workflowHeight + 2
+		errorHeight := lipgloss.Height(components.RenderErrorPane(m.currentError, m.contentRenderer, m.theme, m.terminalWidth))
+
+		usedHeight := m.headerHeight + m.inputHeight + actionsHeight + workflowHeight + errorHeight + 2
 		height = m.terminalHeight - usedHeight
 		if height < 5 {
 			height = 5
@@ -170,15 +172,21 @@ func (m *AppModel) renderHistoryPane() string {
 		height = 20 // Default height
 	}
 
-	if len(m.commandHistory) == 0 {
+	var contentLines []string
+
+	// If an error is active, render it at the top of the history pane
+	if m.recoveryManager.IsActive() {
+		contentLines = append(contentLines, components.RenderErrorPane(m.currentError, m.contentRenderer, m.theme, m.terminalWidth))
+		contentLines = append(contentLines, "") // Add spacing
+	}
+
+	if len(m.commandHistory) == 0 && !m.recoveryManager.IsActive() {
 		emptyMessage := "Connected and ready. Type a command to get started."
 		return historyPaneStyle.
 			Height(height).
 			Width(m.terminalWidth - 4).
 			Render(statusStyle.Render(emptyMessage))
 	}
-
-	var contentLines []string
 
 	for _, entry := range m.commandHistory {
 		contentLines = append(contentLines, m.renderHistoryEntry(entry)...)
@@ -219,14 +227,9 @@ func (m *AppModel) renderHistoryEntry(entry HistoryEntry) []string {
 	lines = append(lines, commandLine)
 
 	// Render application response
-	if entry.Error != "" {
-		// Error response
-		responsePrefix := "APP>"
-		if m.showTimestamps {
-			responsePrefix = fmt.Sprintf("[%s] APP>", entry.Timestamp.Format("15:04:05"))
-		}
-		errorLine := appResponseStyle.Render(responsePrefix) + " " + components.RenderStatus("error", entry.Error)
-		lines = append(lines, errorLine)
+	if entry.Error != nil {
+		// Error response is now handled by the main error pane, so we don't duplicate it here.
+		// We could add a simple marker if desired, but the main pane is clearer.
 	} else if entry.Response != nil {
 		// Successful response
 		responseLines := m.renderResponse(entry.Response, entry.Rendered)
@@ -364,12 +367,7 @@ func (m *AppModel) renderInputComponent() string {
 func (m *AppModel) renderStatusSection() string {
 	var statusLines []string
 
-	// Render error messages
-	if m.errorMessage != "" {
-		statusLines = append(statusLines, components.RenderStatus("error", m.errorMessage))
-	}
-
-	// Render status messages
+	// Render status messages, but not errors, as they are now in their own pane
 	if m.statusMessage != "" {
 		statusLines = append(statusLines, components.RenderStatus("info", m.statusMessage))
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/universal-console/console/internal/errors"
 	"github.com/universal-console/console/internal/interfaces"
 )
 
@@ -331,6 +332,12 @@ func (m *AppModel) cycleFocusBackward() tea.Cmd {
 
 // handleEscapeKey returns focus to the input component from any other focused element
 func (m *AppModel) handleEscapeKey() tea.Cmd {
+	// If an error is active, Esc dismisses it
+	if m.recoveryManager.IsActive() {
+		m.clearStatus()
+		return nil
+	}
+
 	if m.focusState != FocusInput {
 		m.recordNavigation(m.focusState, "escape")
 		m.SetFocus(FocusInput)
@@ -452,8 +459,16 @@ func (m *AppModel) executeSelectedAction() tea.Cmd {
 		return m.showError("No action is selected.")
 	}
 
+	// Determine the correct action list to check against
+	var actionsToCheck []interfaces.Action
+	if m.recoveryManager.IsActive() && m.currentError != nil {
+		actionsToCheck = m.currentError.RecoveryActions
+	} else if m.currentResponse != nil {
+		actionsToCheck = m.currentResponse.Actions
+	}
+
 	// Find the index of the selected action to pass to ExecuteAction
-	for i, a := range m.currentResponse.Actions {
+	for i, a := range actionsToCheck {
 		if a.Command == action.Command && a.Name == action.Name {
 			return m.ExecuteAction(i)
 		}
@@ -530,17 +545,28 @@ func (m *AppModel) handleCommandExecuted(msg commandExecutedMsg) tea.Cmd {
 		m.workflowManager.UpdateState(msg.response.Workflow)
 
 		// Process response content through content renderer
-		return m.renderResponseContent(msg.response)
+		m.addToHistory(historyEntry) // Add to history before rendering content
+		return m.renderResponseContent(historyEntry.Response)
 	} else {
 		// Handle error case
-		historyEntry.Error = msg.error
-		m.errorMessage = msg.error
-		m.actionsPane.Reset()
-		m.workflowManager.EndWorkflow()
-	}
+		var processedErr *errors.ProcessedError
+		if msg.structuredError != nil {
+			processedErr, _ = m.errorHandler.ProcessErrorResponse(msg.structuredError)
+		} else {
+			// **FIX:** Correctly initialize the struct before creating a pointer to it.
+			var errResp interfaces.ErrorResponse
+			errResp.Error.Message = msg.error
+			processedErr, _ = m.errorHandler.ProcessErrorResponse(&errResp)
+		}
 
-	// Add to history
-	m.addToHistory(historyEntry)
+		historyEntry.Error = processedErr
+		m.currentError = processedErr
+		m.recoveryManager.StartSession(processedErr)
+		m.actionsPane.SetActions(m.recoveryManager.GetRecoveryActions())
+		m.workflowManager.EndWorkflow()
+
+		m.addToHistory(historyEntry)
+	}
 
 	// Auto-scroll to bottom if enabled
 	if m.autoScroll {
@@ -553,6 +579,7 @@ func (m *AppModel) handleCommandExecuted(msg commandExecutedMsg) tea.Cmd {
 // handleActionExecuted processes the result of action execution
 func (m *AppModel) handleActionExecuted(msg actionExecutedMsg) tea.Cmd {
 	m.statusMessage = "" // Clear "Executing action..." message
+	m.clearStatus()      // Clear previous error state before processing new response
 
 	// Update connection statistics
 	m.connectionStats.TotalActions++
@@ -580,8 +607,19 @@ func (m *AppModel) handleActionExecuted(msg actionExecutedMsg) tea.Cmd {
 		return m.renderResponseContent(msg.response)
 	} else {
 		// Handle error case
-		m.errorMessage = msg.error
-		m.actionsPane.Reset()
+		var processedErr *errors.ProcessedError
+		if msg.structuredError != nil {
+			processedErr, _ = m.errorHandler.ProcessErrorResponse(msg.structuredError)
+		} else {
+			// **FIX:** Correctly initialize the struct before creating a pointer to it.
+			var errResp interfaces.ErrorResponse
+			errResp.Error.Message = msg.error
+			processedErr, _ = m.errorHandler.ProcessErrorResponse(&errResp)
+		}
+
+		m.currentError = processedErr
+		m.recoveryManager.StartSession(processedErr)
+		m.actionsPane.SetActions(m.recoveryManager.GetRecoveryActions())
 	}
 
 	return nil
@@ -590,28 +628,20 @@ func (m *AppModel) handleActionExecuted(msg actionExecutedMsg) tea.Cmd {
 // handleSectionToggled processes collapsible section toggle results
 func (m *AppModel) handleSectionToggled(msg sectionToggledMsg) {
 	if msg.error != "" {
-		m.errorMessage = msg.error
-		return
+		m.statusMessage = msg.error // Use status message for non-critical errors
 	}
 
+	// Update local state based on the ID from the contentRenderer
 	if msg.sectionID == "all" {
-		// Handle expand/collapse all operations
 		for id := range m.expandedSections {
 			m.expandedSections[id] = msg.expanded
 		}
-		for i := range m.collapsibleElements {
-			m.collapsibleElements[i].Expanded = msg.expanded
-		}
 	} else {
-		// Handle individual section toggle
 		m.expandedSections[msg.sectionID] = msg.expanded
-		for i, element := range m.collapsibleElements {
-			if element.ID == msg.sectionID {
-				m.collapsibleElements[i].Expanded = msg.expanded
-				break
-			}
-		}
 	}
+
+	// Re-render the content to reflect the change
+	m.reRenderHistory()
 }
 
 // handleConnectionStatus processes connection status changes
@@ -634,7 +664,7 @@ func (m *AppModel) handleConnectionStatus(msg connectionStatusMsg) (tea.Model, t
 // handleApplicationInfo processes application metadata updates
 func (m *AppModel) handleApplicationInfo(msg applicationInfoMsg) {
 	if msg.error != "" {
-		m.errorMessage = msg.error
+		m.statusMessage = msg.error
 		return
 	}
 
@@ -661,14 +691,13 @@ func (m *AppModel) renderResponseContent(response *interfaces.CommandResponse) t
 			}
 		}
 
-		// Update rendered content and collapsible elements
-		m.renderedContent = append(m.renderedContent, renderedContent...)
-		m.updateCollapsibleElements(renderedContent)
-
-		// Limit rendered content size to prevent memory growth
-		if len(m.renderedContent) > 10000 {
-			m.renderedContent = m.renderedContent[1000:]
+		// Store rendered content in the last history entry
+		if len(m.commandHistory) > 0 {
+			m.commandHistory[len(m.commandHistory)-1].Rendered = renderedContent
 		}
+
+		// Update collapsible elements for focus management
+		m.updateCollapsibleElements(renderedContent)
 
 		return nil // Using nil here, as the update happens in the closure.
 	})
@@ -690,8 +719,7 @@ func (m *AppModel) addToHistory(entry HistoryEntry) {
 
 // updateCollapsibleElements updates the list of collapsible elements based on rendered content
 func (m *AppModel) updateCollapsibleElements(content []interfaces.RenderedContent) {
-	elements := make([]CollapsibleElement, 0)
-
+	m.collapsibleElements = []CollapsibleElement{}
 	for i, item := range content {
 		if item.Expanded != nil {
 			element := CollapsibleElement{
@@ -700,16 +728,13 @@ func (m *AppModel) updateCollapsibleElements(content []interfaces.RenderedConten
 				Expanded: *item.Expanded,
 				Position: i,
 			}
-			elements = append(elements, element)
+			m.collapsibleElements = append(m.collapsibleElements, element)
 
-			// Initialize expansion state if not present
 			if _, exists := m.expandedSections[item.ID]; !exists {
 				m.expandedSections[item.ID] = *item.Expanded
 			}
 		}
 	}
-
-	m.collapsibleElements = elements
 }
 
 // recordNavigation records a navigation step for user experience analysis
@@ -742,4 +767,25 @@ func (m *AppModel) refreshConnection() tea.Cmd {
 			connected: true,
 		}
 	})
+}
+
+// reRenderHistory re-renders all history entries to reflect state changes (e.g., toggled sections).
+func (m *AppModel) reRenderHistory() {
+	for i, entry := range m.commandHistory {
+		if entry.Response != nil {
+			rendered, err := m.contentRenderer.RenderContent(entry.Response.Response.Content, m.theme)
+			if err == nil {
+				m.commandHistory[i].Rendered = rendered
+			}
+		}
+	}
+	m.updateCollapsibleElementsFromHistory()
+}
+
+// updateCollapsibleElementsFromHistory rebuilds the collapsible element list from the entire history.
+func (m *AppModel) updateCollapsibleElementsFromHistory() {
+	m.collapsibleElements = []CollapsibleElement{}
+	for _, entry := range m.commandHistory {
+		m.updateCollapsibleElements(entry.Rendered)
+	}
 }
