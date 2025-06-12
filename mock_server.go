@@ -1,4 +1,4 @@
-// mock_server.go
+// Mock server that sends the exact JSON structure the Go content renderer expects
 package main
 
 import (
@@ -16,31 +16,19 @@ func specHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	log.Printf("=== SPEC REQUEST ===")
 	log.Printf("Method: %s, URL: %s, Remote: %s", r.Method, r.URL.Path, r.RemoteAddr)
-	log.Printf("Headers: %+v", r.Header)
 
 	spec := interfaces.SpecResponse{
 		AppName:         "Mock Pokémon Server",
 		AppVersion:      "v0.1.0",
 		ProtocolVersion: "2.0",
 		Features: map[string]bool{
-			"richContent":        true,
-			"actions":            true,
-			"progressIndicators": true,
-			"confirmations":      true,
-			"multiStep":          true,
+			"richContent": true,
+			"actions":     true,
 		},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	responseJSON, err := json.MarshalIndent(spec, "", "  ")
-	if err != nil {
-		log.Printf("ERROR: Failed to marshal spec response: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	log.Printf("Sending spec response: %s", string(responseJSON))
-	w.Write(responseJSON)
+	json.NewEncoder(w).Encode(spec)
 
 	duration := time.Since(start)
 	log.Printf("=== SPEC COMPLETED in %v ===\n", duration)
@@ -49,10 +37,7 @@ func specHandler(w http.ResponseWriter, r *http.Request) {
 func commandHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	log.Printf("=== COMMAND REQUEST ===")
-	log.Printf("Method: %s, URL: %s, Remote: %s", r.Method, r.URL.Path, r.RemoteAddr)
-	log.Printf("Headers: %+v", r.Header)
 
-	// Read and log the request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Printf("ERROR: Failed to read request body: %v", err)
@@ -74,9 +59,9 @@ func commandHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Command {
 	case "look":
-		log.Printf("Processing 'look' command - creating structured response")
-		collapsed := false // Explicitly set to false for expanded state
+		log.Printf("Processing 'look' command - creating simple structured response")
 
+		// Start with a simple response that should work
 		resp.Response.Type = "structured"
 		resp.Response.Content = []interfaces.ContentBlock{
 			{
@@ -85,24 +70,9 @@ func commandHandler(w http.ResponseWriter, r *http.Request) {
 				Status:  "info",
 			},
 			{
-				Type:      "collapsible",
-				Title:     "Pidgey's Details",
-				Collapsed: &collapsed,
-				Content: []interfaces.ContentBlock{
-					{
-						Type:    "text",
-						Content: "A tiny bird Pokémon. It is docile and prefers to avoid conflict.",
-					},
-					{
-						Type:    "table",
-						Headers: []string{"Stat", "Value"},
-						Rows: [][]string{
-							{"Level", "5"},
-							{"HP", "40/40"},
-							{"Type", "Normal/Flying"},
-						},
-					},
-				},
+				Type:    "text", // Use simple text instead of collapsible for now
+				Content: "Pidgey Details: A tiny bird Pokémon. Level 5, HP: 40/40, Type: Normal/Flying",
+				Status:  "info",
 			},
 		}
 		resp.Actions = []interfaces.Action{
@@ -118,41 +88,54 @@ func commandHandler(w http.ResponseWriter, r *http.Request) {
 				Type:    "cancel",
 				Icon:    "🏃",
 			},
+		}
+
+	case "look_advanced":
+		log.Printf("Processing 'look_advanced' command - with collapsible content")
+
+		// Try the collapsible content with the structure the Go code expects
+		collapsed := false
+
+		// Create the collapsible content as a structured object
+		collapsibleContent := map[string]interface{}{
+			"title":     "Pidgey's Details",
+			"collapsed": collapsed,
+			"content": []map[string]interface{}{
+				{
+					"type":    "text",
+					"content": "A tiny bird Pokémon. It is docile and prefers to avoid conflict.",
+				},
+			},
+			"expanded": true,
+			"level":    0,
+		}
+
+		resp.Response.Type = "structured"
+		resp.Response.Content = []interfaces.ContentBlock{
 			{
-				Name:    "Check Bag",
-				Command: "check_bag",
-				Type:    "info",
-				Icon:    "🎒",
+				Type:    "text",
+				Content: "A wild Pidgey appears!",
+				Status:  "info",
+			},
+			{
+				Type:    "collapsible",
+				Content: collapsibleContent, // Send as structured object
+			},
+		}
+		resp.Actions = []interfaces.Action{
+			{
+				Name:    "Throw Poké Ball",
+				Command: "throw_ball",
+				Type:    "primary",
+				Icon:    "🔴",
 			},
 		}
 
 	case "throw_ball":
 		log.Printf("Processing 'throw_ball' action")
-		resp.Response.Type = "structured"
-		resp.Response.Content = []interfaces.ContentBlock{
-			{
-				Type:    "text",
-				Content: "You threw a Poké Ball!",
-				Status:  "info",
-			},
-			{
-				Type:     "progress",
-				Label:    "Capturing Pidgey...",
-				Progress: &[]int{75}[0], // 75% progress
-			},
-			{
-				Type:    "text",
-				Content: "Gotcha! Pidgey was caught!",
-				Status:  "success",
-			},
-		}
+		resp.Response.Type = "text"
+		resp.Response.Content = "You threw a Poké Ball! Gotcha! Pidgey was caught!"
 		resp.Actions = []interfaces.Action{
-			{
-				Name:    "Give nickname",
-				Command: "nickname_pidgey",
-				Type:    "info",
-				Icon:    "✏️",
-			},
 			{
 				Name:    "Continue adventure",
 				Command: "continue",
@@ -161,26 +144,10 @@ func commandHandler(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
-	case "error":
-		log.Printf("Simulating error response")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		errorResp := interfaces.ErrorResponse{}
-		errorResp.Error.Message = "The operation failed spectacularly."
-		errorResp.Error.Code = "EPIC_FAIL"
-		errorResp.Error.RecoveryActions = []interfaces.Action{
-			{Name: "Try again", Command: "retry_op", Type: "primary", Icon: "🔄"},
-			{Name: "Give up", Command: "abandon_op", Type: "cancel", Icon: "❌"},
-		}
-		responseJSON, _ := json.MarshalIndent(errorResp, "", "  ")
-		log.Printf("Sending error response: %s", string(responseJSON))
-		w.Write(responseJSON)
-		return
-
 	default:
 		log.Printf("Processing default command: '%s'", req.Command)
 		resp.Response.Type = "text"
-		resp.Response.Content = fmt.Sprintf("You executed command: '%s'. Try 'look' for a rich response!", req.Command)
+		resp.Response.Content = fmt.Sprintf("You executed command: '%s'.\n\nTry these commands:\n  look - Simple structured response\n  look_advanced - With collapsible content", req.Command)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -219,10 +186,33 @@ func actionHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Processing action: '%s'", req.Command)
 
-	// For simplicity, delegate to command handler with the action command
+	// Simple action responses
 	var resp interfaces.CommandResponse
-	resp.Response.Type = "text"
-	resp.Response.Content = fmt.Sprintf("Executed action: %s", req.Command)
+
+	switch req.Command {
+	case "throw_ball":
+		log.Printf("Action: Throwing Poke Ball")
+		resp.Response.Type = "text"
+		resp.Response.Content = "You threw a Poké Ball! Gotcha! Pidgey was caught!"
+		resp.Actions = []interfaces.Action{
+			{
+				Name:    "Continue",
+				Command: "continue",
+				Type:    "primary",
+				Icon:    "➡️",
+			},
+		}
+
+	case "run":
+		log.Printf("Action: Running away")
+		resp.Response.Type = "text"
+		resp.Response.Content = "You ran away safely!"
+
+	default:
+		log.Printf("Generic action response for: %s", req.Command)
+		resp.Response.Type = "text"
+		resp.Response.Content = fmt.Sprintf("Executed action: %s", req.Command)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -238,17 +228,14 @@ func main() {
 	http.HandleFunc("/console/command", commandHandler)
 	http.HandleFunc("/console/action", actionHandler)
 
-	fmt.Println("Mock Compliant Application server starting on :8080...")
-	fmt.Println("Available endpoints:")
-	fmt.Println("  GET  /console/spec    - Application metadata")
-	fmt.Println("  POST /console/command - Command execution")
-	fmt.Println("  POST /console/action  - Action execution")
+	fmt.Println("Mock Server starting on :8080...")
 	fmt.Println()
-	fmt.Println("Try these commands after connecting:")
-	fmt.Println("  look      - Rich structured response with actions")
-	fmt.Println("  error     - Simulated error response")
-	fmt.Println("  anything  - Simple text response")
+	fmt.Println("Available commands:")
+	fmt.Println("  look           - Simple structured response (should work)")
+	fmt.Println("  look_advanced  - With collapsible content (test)")
+	fmt.Println("  anything_else  - Simple text response")
 	fmt.Println()
+	fmt.Println("This version starts with simple content to avoid JSON parsing issues.")
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
