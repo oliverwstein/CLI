@@ -133,7 +133,7 @@ type ConnectionState struct {
 	LastHandshake time.Time              `json:"lastHandshake,omitempty"`
 	Features      map[string]bool        `json:"features,omitempty"`
 	Auth          *interfaces.AuthConfig `json:"-"` // Add this field to store current auth config
-	LastError     *ProtocolError         `json:"lastError,omitempty"`
+	LastError     error                  `json:"lastError,omitempty"`
 	Statistics    ConnectionStatistics   `json:"statistics"`
 }
 

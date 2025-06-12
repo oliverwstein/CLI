@@ -16,7 +16,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/universal-console/console/internal/errors"
 	"github.com/universal-console/console/internal/interfaces"
+	"github.com/universal-console/console/internal/logging"
 )
 
 // Client implements the ProtocolClient interface with comprehensive HTTP communication capabilities
@@ -29,6 +31,7 @@ type Client struct {
 	mutex           sync.RWMutex
 	userAgent       string
 	sessionID       string
+	logger          *logging.Logger
 }
 
 // NewClient creates a new protocol client with injected dependencies and secure defaults
@@ -52,6 +55,8 @@ func NewClient(configManager interfaces.ConfigManager, authManager interfaces.Au
 		},
 	}
 
+	logger := logging.GetProtocolLogger().WithField("session_id", generateSessionID())
+	
 	client := &Client{
 		httpClient:    httpClient,
 		configManager: configManager,
@@ -63,18 +68,44 @@ func NewClient(configManager interfaces.ConfigManager, authManager interfaces.Au
 		},
 		userAgent: fmt.Sprintf("Universal-Console/%s (Protocol/%s)", "2.0.0", ProtocolVersion),
 		sessionID: generateSessionID(),
+		logger:    logger,
 	}
+	
+	logger.Info("Protocol client initialized",
+		logging.GetGlobalLogger().WithField("user_agent", client.userAgent))
 
 	return client, nil
 }
 
 // Connect establishes connection and performs handshake with the application
 func (c *Client) Connect(ctx context.Context, host string, auth *interfaces.AuthConfig) (*interfaces.SpecResponse, error) {
+	startTime := time.Now()
+	authType := "none"
+	if auth != nil {
+		authType = auth.Type
+	}
+	
+	c.logger.LogConnectionAttempt(host, authType)
+	c.logger.Debug("Starting connection process",
+		"host", host,
+		"timeout", HandshakeTimeout,
+		"has_auth", auth != nil)
+
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	c.logger.Debug("Validating connection parameters")
 	if err := c.validateConnectionParams(host, auth); err != nil {
-		return nil, fmt.Errorf("invalid connection parameters: %w", err)
+		c.logger.Error("Connection parameter validation failed", "error", err.Error())
+		contextualErr := errors.NewConnectionError("protocol").
+			WithMessage("Connection parameter validation failed").
+			WithUserMessage("Invalid connection configuration. Please check host and authentication settings.").
+			WithOperation("validate_connection_params").
+			WithCause(err).
+			WithContext("host", host).
+			WithContext("auth_type", authType).
+			Build()
+		return nil, contextualErr
 	}
 
 	c.connectionState.Host = host
@@ -83,33 +114,90 @@ func (c *Client) Connect(ctx context.Context, host string, auth *interfaces.Auth
 	c.connectionState.Auth = auth // Store auth config for subsequent requests
 
 	handshakeURL := c.buildURL(host, EndpointSpec)
+	c.logger.Debug("Built handshake URL", "url", handshakeURL)
+	
 	handshakeCtx, cancel := context.WithTimeout(ctx, HandshakeTimeout)
 	defer cancel()
 
+	c.logger.Debug("Creating handshake request")
 	req, err := c.createHandshakeRequest(handshakeCtx, handshakeURL, auth)
 	if err != nil {
-		return nil, c.wrapConnectionError("failed to create handshake request", err)
+		c.logger.Error("Failed to create handshake request", "error", err.Error())
+		contextualErr := errors.NewConnectionError("protocol").
+			WithMessage("Failed to create handshake request").
+			WithUserMessage("Unable to prepare connection request. Please check your connection settings.").
+			WithOperation("create_handshake_request").
+			WithCause(err).
+			WithContext("url", handshakeURL).
+			WithContext("host", host).
+			Build()
+		c.connectionState.LastError = contextualErr
+		return nil, contextualErr
 	}
 
-	startTime := time.Now()
+	c.logger.Debug("Executing handshake request", "method", req.Method, "url", req.URL.String())
+	requestStartTime := time.Now()
 	resp, err := c.httpClient.Do(req)
-	c.updateRequestStatistics(time.Since(startTime), err == nil)
+	requestDuration := time.Since(requestStartTime)
+	c.updateRequestStatisticsUnsafe(requestDuration, err == nil)
 
 	if err != nil {
-		return nil, c.wrapConnectionError("handshake request failed", err)
+		c.logger.LogConnectionFailure(host, err, requestDuration)
+		c.logger.Error("Handshake HTTP request failed", 
+			"error", err.Error(),
+			"duration", requestDuration,
+			"url", handshakeURL)
+		
+		contextualErr := errors.NewNetworkError("protocol").
+			WithMessage("Handshake request failed").
+			WithUserMessage("Unable to connect to the application. Please check if the server is running and accessible.").
+			WithOperation("handshake_request").
+			WithCause(err).
+			WithContext("host", host).
+			WithContext("url", handshakeURL).
+			WithContext("duration", requestDuration).
+			WithRetryAfter(5 * time.Second).
+			Build()
+		c.connectionState.LastError = contextualErr
+		return nil, contextualErr
 	}
 	defer resp.Body.Close()
 
+	c.logger.Debug("Received handshake response", 
+		"status_code", resp.StatusCode,
+		"status", resp.Status,
+		"duration", requestDuration)
+
 	specResponse, err := c.processHandshakeResponse(resp)
 	if err != nil {
-		return nil, c.wrapConnectionError("invalid handshake response", err)
+		c.logger.Error("Handshake response processing failed", "error", err.Error())
+		contextualErr := errors.NewProtocolError("protocol").
+			WithMessage("Invalid handshake response").
+			WithUserMessage("The server response is not compatible with this client. Please check if you're connecting to a supported application.").
+			WithOperation("process_handshake_response").
+			WithCause(err).
+			WithContext("host", host).
+			WithContext("status_code", resp.StatusCode).
+			WithContext("status", resp.Status).
+			Build()
+		c.connectionState.LastError = contextualErr
+		return nil, contextualErr
 	}
 
+	totalDuration := time.Since(startTime)
 	c.connectionState.Connected = true
 	c.connectionState.AppName = specResponse.AppName
 	c.connectionState.AppVersion = specResponse.AppVersion
 	c.connectionState.LastHandshake = time.Now()
 	c.connectionState.Features = specResponse.Features
+
+	c.logger.LogConnectionSuccess(host, specResponse.AppName, specResponse.ProtocolVersion, totalDuration)
+	c.logger.Info("Connection established successfully",
+		"app_name", specResponse.AppName,
+		"app_version", specResponse.AppVersion,
+		"protocol_version", specResponse.ProtocolVersion,
+		"total_duration", totalDuration,
+		"features", len(specResponse.Features))
 
 	return &specResponse.SpecResponse, nil
 }
@@ -332,30 +420,68 @@ func (c *Client) GetLastError() error {
 	return c.connectionState.LastError
 }
 
+// GetConnectionState returns the current connection state for UI access
+func (c *Client) GetConnectionState() *ConnectionState {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	
+	// Return a copy to prevent external modification
+	stateCopy := *c.connectionState
+	return &stateCopy
+}
+
 // --- Internal Helper Methods ---
 
 // executeJSONRequest handles the core logic of making a POST request with a JSON body.
 func (c *Client) executeJSONRequest(ctx context.Context, endpoint string, payload interface{}) ([]byte, error) {
+	c.logger.Debug("Creating JSON request", "endpoint", endpoint)
 	req, err := c.createJSONRequest(ctx, endpoint, payload)
 	if err != nil {
+		c.logger.Error("Failed to create JSON request", "endpoint", endpoint, "error", err.Error())
 		return nil, c.wrapProtocolError("failed to create request", err)
 	}
 
+	c.logger.Debug("Executing JSON request", 
+		"method", req.Method, 
+		"url", req.URL.String(),
+		"content_type", req.Header.Get("Content-Type"))
+	
 	startTime := time.Now()
 	resp, err := c.httpClient.Do(req)
-	c.updateRequestStatistics(time.Since(startTime), err == nil)
+	duration := time.Since(startTime)
+	c.updateRequestStatistics(duration, err == nil)
 
 	if err != nil {
+		c.logger.Error("JSON request execution failed", 
+			"endpoint", endpoint,
+			"error", err.Error(),
+			"duration", duration)
 		return nil, c.wrapNetworkError("request execution failed", err)
 	}
 	defer resp.Body.Close()
 
+	c.logger.LogHTTPRequest(req.Method, req.URL.String(), resp.StatusCode, duration)
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.logger.Error("Failed to read response body", 
+			"endpoint", endpoint,
+			"status_code", resp.StatusCode,
+			"error", err.Error())
 		return nil, c.wrapNetworkError("failed to read response body", err)
 	}
 
+	c.logger.Debug("Received response", 
+		"endpoint", endpoint,
+		"status_code", resp.StatusCode,
+		"content_length", len(body),
+		"duration", duration)
+
 	if resp.StatusCode >= 400 {
+		c.logger.Warn("HTTP error response", 
+			"endpoint", endpoint,
+			"status_code", resp.StatusCode,
+			"status", resp.Status)
 		return nil, c.handleHTTPError(resp, body)
 	}
 
@@ -551,6 +677,12 @@ func (c *Client) wrapConnectionError(message string, err error) error {
 	return protocolErr
 }
 
+func (c *Client) wrapConnectionErrorUnsafe(message string, err error) error {
+	protocolErr := &ProtocolError{Type: "connection", Message: fmt.Sprintf("%s: %v", message, err), OriginalError: err, Timestamp: time.Now(), Recoverable: true}
+	c.connectionState.LastError = protocolErr
+	return protocolErr
+}
+
 func (c *Client) wrapNetworkError(message string, err error) error {
 	protocolErr := &ProtocolError{Type: "network", Message: fmt.Sprintf("%s: %v", message, err), OriginalError: err, Timestamp: time.Now(), Recoverable: true}
 	c.mutex.Lock()
@@ -571,6 +703,11 @@ func (c *Client) wrapProtocolError(message string, err error) error {
 func (c *Client) updateRequestStatistics(responseTime time.Duration, success bool) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.updateRequestStatisticsUnsafe(responseTime, success)
+}
+
+// updateRequestStatisticsUnsafe updates statistics without acquiring the mutex (caller must hold lock)
+func (c *Client) updateRequestStatisticsUnsafe(responseTime time.Duration, success bool) {
 	stats := &c.connectionState.Statistics
 	stats.TotalRequests++
 	stats.LastRequestTime = time.Now()

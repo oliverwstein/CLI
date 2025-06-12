@@ -6,29 +6,45 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/universal-console/console/internal/interfaces"
 )
 
 func specHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	log.Printf("GET /console/spec - Handshake request from %s", r.RemoteAddr)
+	
 	spec := interfaces.SpecResponse{
 		AppName:         "Mock Pokémon Server",
 		AppVersion:      "v0.1.0",
 		ProtocolVersion: "2.0",
 		Features:        map[string]bool{"richContent": true, "actions": true},
 	}
+	
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(spec)
+	if err := json.NewEncoder(w).Encode(spec); err != nil {
+		log.Printf("Failed to encode spec response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	
+	duration := time.Since(start)
+	log.Printf("GET /console/spec - Completed in %v", duration)
 }
 
 func commandHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	log.Printf("POST /console/command - Request from %s", r.RemoteAddr)
+	
 	var req interfaces.CommandRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("Failed to decode command request: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("Received command: %s", req.Command)
+	log.Printf("Processing command: '%s'", req.Command)
 
 	var resp interfaces.CommandResponse
 
@@ -69,7 +85,14 @@ func commandHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("Failed to encode command response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	
+	duration := time.Since(start)
+	log.Printf("POST /console/command - Completed in %v", duration)
 }
 
 func main() {

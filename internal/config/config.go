@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/universal-console/console/internal/errors"
 	"github.com/universal-console/console/internal/interfaces"
+	"github.com/universal-console/console/internal/logging"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,29 +27,60 @@ type Manager struct {
 	configPath   string
 	securityMgr  SecurityManager
 	cachedConfig *Config
+	logger       *logging.Logger
 }
 
 // NewManager creates a new configuration manager with OS-appropriate paths and security setup
 func NewManager() (*Manager, error) {
+	logger := logging.GetConfigLogger()
+	
+	logger.Debug("Initializing configuration manager")
+	
 	configPath, err := getConfigPath()
 	if err != nil {
-		return nil, fmt.Errorf("failed to determine configuration path: %w", err)
+		logger.Error("Failed to determine configuration path", "error", err.Error())
+		return nil, errors.NewConfigurationError("config").
+			WithMessage("Failed to determine configuration path").
+			WithUserMessage("Unable to locate configuration directory. Please check system permissions.").
+			WithOperation("get_config_path").
+			WithCause(err).
+			Build()
 	}
+	
+	logger.Debug("Configuration path determined", "path", configPath)
 
 	securityMgr, err := NewSecurityManager()
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize security manager: %w", err)
+		logger.Error("Failed to initialize security manager", "error", err.Error())
+		return nil, errors.NewConfigurationError("config").
+			WithMessage("Failed to initialize security manager").
+			WithUserMessage("Unable to set up secure credential storage. Please check system permissions.").
+			WithOperation("init_security_manager").
+			WithCause(err).
+			Build()
 	}
+	
+	logger.Debug("Security manager initialized successfully")
 
 	manager := &Manager{
 		configPath:  configPath,
 		securityMgr: securityMgr,
+		logger:      logger,
 	}
 
 	// Ensure configuration directory exists with appropriate permissions
 	if err := manager.ensureConfigDirectory(); err != nil {
-		return nil, fmt.Errorf("failed to create configuration directory: %w", err)
+		logger.Error("Failed to create configuration directory", "error", err.Error())
+		return nil, errors.NewConfigurationError("config").
+			WithMessage("Failed to create configuration directory").
+			WithUserMessage("Cannot create configuration directory. Please check permissions.").
+			WithOperation("ensure_config_directory").
+			WithCause(err).
+			WithContext("path", configPath).
+			Build()
 	}
+	
+	logger.Info("Configuration manager initialized successfully", "config_path", configPath)
 
 	return manager, nil
 }
@@ -84,46 +117,93 @@ func (m *Manager) ensureConfigDirectory() error {
 
 // loadConfig reads and parses the configuration file, creating defaults if necessary
 func (m *Manager) loadConfig() (*Config, error) {
+	m.logger.Debug("Loading configuration")
+	
 	// Return cached configuration if available
 	if m.cachedConfig != nil {
+		m.logger.Debug("Using cached configuration")
 		return m.cachedConfig, nil
 	}
 
 	// Check if configuration file exists
 	if _, err := os.Stat(m.configPath); os.IsNotExist(err) {
+		m.logger.Info("Configuration file not found, creating default configuration", "path", m.configPath)
 		// Create default configuration if file doesn't exist
 		config := m.createDefaultConfig()
 		if err := m.saveConfig(config); err != nil {
-			return nil, fmt.Errorf("failed to create default configuration: %w", err)
+			m.logger.Error("Failed to create default configuration", "error", err.Error())
+			return nil, errors.NewConfigurationError("config").
+				WithMessage("Failed to create default configuration").
+				WithUserMessage("Cannot create default configuration file. Please check directory permissions.").
+				WithOperation("create_default_config").
+				WithCause(err).
+				WithContext("config_path", m.configPath).
+				Build()
 		}
 		m.cachedConfig = config
+		m.logger.Info("Default configuration created successfully")
 		return config, nil
 	}
 
 	// Read existing configuration file
+	m.logger.Debug("Reading configuration file", "path", m.configPath)
 	data, err := os.ReadFile(m.configPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read configuration file: %w", err)
+		m.logger.Error("Failed to read configuration file", "error", err.Error(), "path", m.configPath)
+		return nil, errors.NewConfigurationError("config").
+			WithMessage("Failed to read configuration file").
+			WithUserMessage("Cannot read configuration file. Please check file permissions.").
+			WithOperation("read_config_file").
+			WithCause(err).
+			WithContext("config_path", m.configPath).
+			Build()
 	}
 
+	m.logger.Debug("Parsing configuration file", "size_bytes", len(data))
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse configuration file: %w", err)
+		m.logger.Error("Failed to parse configuration file", "error", err.Error())
+		return nil, errors.NewConfigurationError("config").
+			WithMessage("Failed to parse configuration file").
+			WithUserMessage("Configuration file format is invalid. Please check YAML syntax.").
+			WithOperation("parse_config_yaml").
+			WithCause(err).
+			WithContext("config_path", m.configPath).
+			Build()
 	}
 
-	// Decrypt sensitive fields in profiles
+	// Validate and decrypt sensitive fields in profiles
+	m.logger.Debug("Processing profiles", "profile_count", len(config.Profiles))
 	for name, profile := range config.Profiles {
 		if profile.Auth.Type == "bearer" && profile.Auth.Token != "" {
+			m.logger.Debug("Decrypting credentials for profile", "profile", name)
 			decryptedToken, err := m.securityMgr.DecryptCredential(profile.Auth.Token)
 			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt token for profile %s: %w", name, err)
+				m.logger.Error("Failed to decrypt credentials", "profile", name, "error", err.Error())
+				return nil, errors.NewConfigurationError("config").
+					WithMessage(fmt.Sprintf("Failed to decrypt token for profile %s", name)).
+					WithUserMessage("Unable to decrypt saved credentials. They may be corrupted.").
+					WithOperation("decrypt_credentials").
+					WithCause(err).
+					WithContext("profile", name).
+					Build()
 			}
 			profile.Auth.Token = decryptedToken
 			config.Profiles[name] = profile
 		}
 	}
 
+	// Validate configuration
+	if err := m.validateConfig(&config); err != nil {
+		m.logger.Error("Configuration validation failed", "error", err.Error())
+		return nil, err
+	}
+
 	m.cachedConfig = &config
+	m.logger.Info("Configuration loaded successfully", 
+		"profiles", len(config.Profiles),
+		"themes", len(config.Themes),
+		"apps", len(config.RegisteredApps))
 	return &config, nil
 }
 
@@ -372,6 +452,100 @@ func (m *Manager) validateBearerToken(token string) error {
 
 	// Additional validation could include JWT format checking, but we keep it simple
 	// for compatibility with various token formats
+	return nil
+}
+
+// validateConfig performs comprehensive validation of the entire configuration
+func (m *Manager) validateConfig(config *Config) error {
+	m.logger.Debug("Validating configuration structure")
+	
+	if config == nil {
+		return errors.NewValidationError("config").
+			WithMessage("Configuration cannot be nil").
+			WithUserMessage("Configuration is empty or corrupted").
+			WithOperation("validate_config").
+			Build()
+	}
+
+	// Validate all profiles
+	for name, profile := range config.Profiles {
+		profileCopy := profile // Create a copy to pass by reference
+		if err := m.ValidateProfile(&profileCopy); err != nil {
+			m.logger.Warn("Invalid profile found", "profile", name, "error", err.Error())
+			return errors.NewValidationError("config").
+				WithMessage(fmt.Sprintf("Invalid profile '%s'", name)).
+				WithUserMessage(fmt.Sprintf("Profile '%s' has invalid configuration", name)).
+				WithOperation("validate_profile").
+				WithCause(err).
+				WithContext("profile_name", name).
+				Build()
+		}
+	}
+
+	// Validate themes
+	for name, theme := range config.Themes {
+		if err := m.validateTheme(name, &theme); err != nil {
+			m.logger.Warn("Invalid theme found", "theme", name, "error", err.Error())
+			return errors.NewValidationError("config").
+				WithMessage(fmt.Sprintf("Invalid theme '%s'", name)).
+				WithUserMessage(fmt.Sprintf("Theme '%s' has invalid configuration", name)).
+				WithOperation("validate_theme").
+				WithCause(err).
+				WithContext("theme_name", name).
+				Build()
+		}
+	}
+
+	// Validate registered applications
+	for i, app := range config.RegisteredApps {
+		if err := m.validateRegisteredApp(&app); err != nil {
+			m.logger.Warn("Invalid registered app found", "app", app.Name, "error", err.Error())
+			return errors.NewValidationError("config").
+				WithMessage(fmt.Sprintf("Invalid registered application at index %d", i)).
+				WithUserMessage(fmt.Sprintf("Registered application '%s' has invalid configuration", app.Name)).
+				WithOperation("validate_registered_app").
+				WithCause(err).
+				WithContext("app_index", i).
+				WithContext("app_name", app.Name).
+				Build()
+		}
+	}
+
+	m.logger.Debug("Configuration validation completed successfully")
+	return nil
+}
+
+// validateTheme validates a theme configuration
+func (m *Manager) validateTheme(name string, theme *interfaces.Theme) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("theme name cannot be empty")
+	}
+	
+	if theme.Name == "" {
+		theme.Name = name // Set name if not provided
+	}
+	
+	// Basic color validation - ensure they're not empty
+	if strings.TrimSpace(theme.Success) == "" ||
+		strings.TrimSpace(theme.Error) == "" ||
+		strings.TrimSpace(theme.Warning) == "" ||
+		strings.TrimSpace(theme.Info) == "" {
+		return fmt.Errorf("theme colors cannot be empty")
+	}
+	
+	return nil
+}
+
+// validateRegisteredApp validates a registered application configuration
+func (m *Manager) validateRegisteredApp(app *interfaces.RegisteredApp) error {
+	if strings.TrimSpace(app.Name) == "" {
+		return fmt.Errorf("application name cannot be empty")
+	}
+	
+	if strings.TrimSpace(app.Profile) == "" {
+		return fmt.Errorf("application profile cannot be empty")
+	}
+	
 	return nil
 }
 

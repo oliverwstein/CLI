@@ -553,8 +553,21 @@ func (m *AppModel) loadApplicationInfo() tea.Cmd {
 	}
 
 	return tea.Cmd(func() tea.Msg {
-		// Application info should be available from the protocol client's connection state
-		// In a real implementation, this might query the client for current connection details
+		// Get application info from the protocol client's connection state
+		// Check if we can cast to the concrete client type to access connection state
+		if client, ok := m.protocolClient.(*protocol.Client); ok {
+			// Access connection state via a method we need to add
+			if connectionState := client.GetConnectionState(); connectionState != nil {
+				return applicationInfoMsg{
+					appName:         connectionState.AppName,
+					appVersion:      connectionState.AppVersion,
+					protocolVersion: "2.0", // Could also get from connection state
+					features:        connectionState.Features,
+				}
+			}
+		}
+		
+		// Fallback if we can't access connection state
 		return applicationInfoMsg{
 			appName:         "Connected Application",
 			appVersion:      "Unknown",

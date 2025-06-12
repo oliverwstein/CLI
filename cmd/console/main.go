@@ -17,6 +17,7 @@ import (
 	"github.com/universal-console/console/internal/config"
 	"github.com/universal-console/console/internal/content"
 	"github.com/universal-console/console/internal/interfaces"
+	"github.com/universal-console/console/internal/logging"
 	"github.com/universal-console/console/internal/protocol"
 	"github.com/universal-console/console/internal/registry"
 	app_ui "github.com/universal-console/console/internal/ui/app"
@@ -243,19 +244,43 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Initialize logging as early as possible
+	logConfig := logging.DefaultConfig()
+	logConfig.Level = logging.InfoLevel
+	
+	// Increase log level if we're in development mode
+	if os.Getenv("CONSOLE_DEBUG") == "true" {
+		logConfig.Level = logging.DebugLevel
+		logConfig.Format = "json"
+	}
+	
+	if err := logging.InitGlobalLogger(logConfig); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
+		os.Exit(1)
+	}
+	
+	logger := logging.GetGlobalLogger()
+	logger.Info("Universal Application Console starting",
+		"version", Version,
+		"args", fmt.Sprintf("%+v", args))
+
 	// Validate argument compatibility
 	if err := validateArguments(args); err != nil {
+		logger.Error("Invalid arguments", "error", err.Error())
 		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
 		flag.Usage()
 		os.Exit(1)
 	}
 
 	// Instantiate concrete implementations of all interfaces
+	logger.Debug("Initializing application components")
 	configManager, protocolClient, contentRenderer, registryManager, authManager, err := createConcreteImplementations()
 	if err != nil {
+		logger.Error("Failed to initialize application components", "error", err.Error())
 		fmt.Fprintf(os.Stderr, "Error initializing application components: %v\n", err)
 		os.Exit(1)
 	}
+	logger.Info("Application components initialized successfully")
 
 	// Create the main application instance with dependency injection
 	consoleApp := &ConsoleApp{
@@ -268,16 +293,21 @@ func main() {
 	}
 
 	// Create and start the appropriate Bubble Tea program
+	logger.Debug("Creating Bubble Tea program")
 	program, err := consoleApp.createBubbleTeaProgram()
 	if err != nil {
+		logger.Error("Failed to create application interface", "error", err.Error())
 		log.Fatalf("Failed to create application interface: %v", err)
 	}
 
 	// Start the TUI application
+	logger.Info("Starting TUI application")
 	if _, err := program.Run(); err != nil {
+		logger.Error("Application terminated with error", "error", err.Error())
 		log.Fatalf("Application terminated with error: %v", err)
 	}
 
 	// Graceful shutdown
+	logger.Info("Application shutdown completed successfully")
 	fmt.Println("Universal Application Console terminated successfully.")
 }
