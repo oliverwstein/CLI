@@ -7,7 +7,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -23,10 +22,11 @@ import (
 	app_ui "github.com/universal-console/console/internal/ui/app"
 )
 
-// Version information for the Universal Application Console
+// Application metadata
 const (
-	Version     = "2.0.0"
-	ProgramName = "Universal Application Console"
+	Version         = "2.0.0"
+	ProgramName     = "Universal Application Console"
+	ProtocolVersion = "2.0"
 )
 
 // CommandLineArgs represents parsed command-line arguments
@@ -38,14 +38,65 @@ type CommandLineArgs struct {
 	ShowVersion bool
 }
 
+// Dependencies holds all injected application dependencies
+type Dependencies struct {
+	ConfigManager   interfaces.ConfigManager
+	ProtocolClient  interfaces.ProtocolClient
+	ContentRenderer interfaces.ContentRenderer
+	RegistryManager interfaces.RegistryManager
+	AuthManager     interfaces.AuthManager
+	Logger          *logging.Logger
+}
+
 // ConsoleApp represents the main application with all injected dependencies
 type ConsoleApp struct {
-	configManager   interfaces.ConfigManager
-	protocolClient  interfaces.ProtocolClient
-	contentRenderer interfaces.ContentRenderer
-	registryManager interfaces.RegistryManager
-	authManager     interfaces.AuthManager
-	args            CommandLineArgs
+	deps Dependencies
+	args CommandLineArgs
+}
+
+func main() {
+	// Parse and validate command-line arguments
+	args := parseCommandLineArgs()
+
+	// Handle immediate exit conditions
+	if handleEarlyExitConditions(args) {
+		return
+	}
+
+	// Initialize logging system
+	logger := initializeLogging(args)
+
+	// Validate command-line arguments
+	if err := validateArguments(args); err != nil {
+		logger.Error("Invalid arguments", "error", err.Error())
+		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Initialize all application dependencies
+	deps, err := initializeDependencies(logger)
+	if err != nil {
+		logger.Error("Failed to initialize application components", "error", err.Error())
+		fmt.Fprintf(os.Stderr, "Error initializing application: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Create and run the console application
+	consoleApp := &ConsoleApp{
+		deps: deps,
+		args: args,
+	}
+
+	if err := consoleApp.Run(); err != nil {
+		logger.Error("Application terminated with error", "error", err.Error())
+		fmt.Fprintf(os.Stderr, "Application error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Graceful shutdown
+	logger.Info("Application shutdown completed successfully")
+	fmt.Println("Universal Application Console terminated successfully.")
 }
 
 // parseCommandLineArgs processes command-line arguments according to the specification
@@ -75,8 +126,48 @@ func parseCommandLineArgs() CommandLineArgs {
 	}
 
 	flag.Parse()
-
 	return args
+}
+
+// handleEarlyExitConditions processes help and version flags that cause immediate exit
+func handleEarlyExitConditions(args CommandLineArgs) bool {
+	if args.ShowHelp {
+		flag.Usage()
+		return true
+	}
+
+	if args.ShowVersion {
+		fmt.Printf("%s v%s\n", ProgramName, Version)
+		fmt.Printf("Protocol Version: %s\n", ProtocolVersion)
+		fmt.Printf("Built with Go and Charm libraries\n")
+		return true
+	}
+
+	return false
+}
+
+// initializeLogging sets up the logging system based on environment and arguments
+func initializeLogging(args CommandLineArgs) *logging.Logger {
+	logConfig := logging.DefaultConfig()
+	logConfig.Level = logging.InfoLevel
+
+	// Enable debug logging if environment variable is set
+	if os.Getenv("CONSOLE_DEBUG") == "true" {
+		logConfig.Level = logging.DebugLevel
+		logConfig.Format = "json"
+	}
+
+	if err := logging.InitGlobalLogger(logConfig); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
+		os.Exit(1)
+	}
+
+	logger := logging.GetGlobalLogger()
+	logger.Info("Universal Application Console starting",
+		"version", Version,
+		"args", fmt.Sprintf("%+v", args))
+
+	return logger
 }
 
 // validateArguments ensures command-line arguments are valid and compatible
@@ -96,26 +187,135 @@ func validateArguments(args CommandLineArgs) error {
 	return nil
 }
 
+// initializeDependencies creates all application dependencies with proper error handling
+func initializeDependencies(logger *logging.Logger) (Dependencies, error) {
+	logger.Debug("Initializing application components")
+
+	var deps Dependencies
+	deps.Logger = logger
+
+	// Initialize configuration manager
+	configManager, err := config.NewManager()
+	if err != nil {
+		return deps, fmt.Errorf("failed to initialize config manager: %w", err)
+	}
+	deps.ConfigManager = configManager
+
+	// Initialize authentication manager
+	authManager, err := auth.NewManager(configManager)
+	if err != nil {
+		return deps, fmt.Errorf("failed to initialize auth manager: %w", err)
+	}
+	deps.AuthManager = authManager
+
+	// Initialize protocol client
+	protocolClient, err := protocol.NewClient(configManager, authManager)
+	if err != nil {
+		return deps, fmt.Errorf("failed to initialize protocol client: %w", err)
+	}
+	deps.ProtocolClient = protocolClient
+
+	// Initialize content renderer
+	contentRenderer, err := content.NewRenderer()
+	if err != nil {
+		return deps, fmt.Errorf("failed to initialize content renderer: %w", err)
+	}
+	deps.ContentRenderer = contentRenderer
+
+	// Initialize registry manager
+	registryManager, err := registry.NewManager(configManager, protocolClient)
+	if err != nil {
+		return deps, fmt.Errorf("failed to initialize registry manager: %w", err)
+	}
+	deps.RegistryManager = registryManager
+
+	logger.Info("Application components initialized successfully")
+	return deps, nil
+}
+
+// Run starts the console application with the appropriate mode
+func (ca *ConsoleApp) Run() error {
+	ca.deps.Logger.Debug("Creating Bubble Tea program")
+
+	program, err := ca.createBubbleTeaProgram()
+	if err != nil {
+		return fmt.Errorf("failed to create application interface: %w", err)
+	}
+
+	ca.deps.Logger.Info("Starting TUI application")
+
+	_, err = program.Run()
+	return err
+}
+
+// shouldLaunchDirectConnection determines if the application should connect directly
+// to an application instead of showing the Console Menu
+func (ca *ConsoleApp) shouldLaunchDirectConnection() bool {
+	return ca.args.Host != "" || ca.args.Profile != ""
+}
+
+// createBubbleTeaProgram instantiates the appropriate Bubble Tea model based on mode
+func (ca *ConsoleApp) createBubbleTeaProgram() (*tea.Program, error) {
+	// Configure program options for Claude Code-like experience
+	programOptions := []tea.ProgramOption{
+		tea.WithAltScreen(),       // Full-screen alternate buffer like Claude Code
+		tea.WithMouseCellMotion(), // Enable mouse support
+	}
+
+	if ca.shouldLaunchDirectConnection() {
+		model, err := ca.createDirectConnectionModel()
+		if err != nil {
+			return nil, err
+		}
+		return tea.NewProgram(model, programOptions...), nil
+	}
+
+	model := ca.createConsoleMenuModel()
+	return tea.NewProgram(model, programOptions...), nil
+}
+
+// createDirectConnectionModel creates the Application Mode model for direct connections
+func (ca *ConsoleApp) createDirectConnectionModel() (tea.Model, error) {
+	profile, err := ca.determineProfile()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine connection profile: %w", err)
+	}
+
+	// Attempt immediate connection
+	_, err = ca.deps.ProtocolClient.Connect(context.Background(), profile.Host, &profile.Auth)
+	if err != nil {
+		// Log the error but continue, the app model will handle showing the error
+		ca.deps.Logger.Warn("Direct connection failed, will show error in UI", "error", err.Error())
+	}
+
+	// Create the Application Mode model
+	model := app_ui.NewAppModel(
+		profile,
+		ca.deps.ProtocolClient,
+		ca.deps.ContentRenderer,
+		ca.deps.ConfigManager,
+		ca.deps.AuthManager,
+	)
+
+	return model, nil
+}
+
+// createConsoleMenuModel creates the Console Menu Mode model
+func (ca *ConsoleApp) createConsoleMenuModel() tea.Model {
+	return app.NewConsoleController(
+		ca.deps.RegistryManager,
+		ca.deps.ConfigManager,
+		ca.deps.ProtocolClient,
+		ca.deps.ContentRenderer,
+		ca.deps.AuthManager,
+	)
+}
+
 // determineProfile resolves which profile to use based on command-line arguments
 func (ca *ConsoleApp) determineProfile() (*interfaces.Profile, error) {
 	// If host is explicitly specified, create a temporary profile
 	if ca.args.Host != "" {
-		profile := &interfaces.Profile{
-			Name:          "temporary",
-			Host:          ca.args.Host,
-			Theme:         ca.args.Theme,
-			Confirmations: true,
-			Auth: interfaces.AuthConfig{
-				Type: "none",
-			},
-		}
-
-		// Apply theme override if specified
-		if ca.args.Theme != "" {
-			profile.Theme = ca.args.Theme
-		}
-
-		return profile, nil
+		return ca.createTemporaryProfile(), nil
 	}
 
 	// Use specified profile or default to "default"
@@ -124,7 +324,7 @@ func (ca *ConsoleApp) determineProfile() (*interfaces.Profile, error) {
 		profileName = "default"
 	}
 
-	profile, err := ca.configManager.LoadProfile(profileName)
+	profile, err := ca.deps.ConfigManager.LoadProfile(profileName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load profile '%s': %w", profileName, err)
 	}
@@ -137,177 +337,22 @@ func (ca *ConsoleApp) determineProfile() (*interfaces.Profile, error) {
 	return profile, nil
 }
 
-// shouldLaunchDirectConnection determines if the application should connect directly
-// to an application instead of showing the Console Menu
-func (ca *ConsoleApp) shouldLaunchDirectConnection() bool {
-	return ca.args.Host != "" || ca.args.Profile != ""
-}
-
-// createBubbleTeaProgram instantiates the appropriate Bubble Tea model based on mode
-func (ca *ConsoleApp) createBubbleTeaProgram() (*tea.Program, error) {
-	if ca.shouldLaunchDirectConnection() {
-		// Direct connection mode - launch Application Mode immediately
-		profile, err := ca.determineProfile()
-		if err != nil {
-			return nil, fmt.Errorf("failed to determine connection profile: %w", err)
-		}
-
-		// Connect immediately
-		_, err = ca.protocolClient.Connect(context.Background(), profile.Host, &profile.Auth)
-		if err != nil {
-			// Log the error but continue, the app model will handle showing the error
-			log.Printf("Direct connection failed: %v", err)
-		}
-
-		// Create the Application Mode model directly
-		model := app_ui.NewAppModel(
-			profile,
-			ca.protocolClient,
-			ca.contentRenderer,
-			ca.configManager,
-			ca.authManager,
-		)
-
-		return tea.NewProgram(model, tea.WithAltScreen()), nil
-	} else {
-		// Console Menu Mode - use the main controller
-		model := app.NewConsoleController(
-			ca.registryManager,
-			ca.configManager,
-			ca.protocolClient,
-			ca.contentRenderer,
-			ca.authManager,
-		)
-
-		return tea.NewProgram(model, tea.WithAltScreen()), nil
-	}
-}
-
-// createConcreteImplementations instantiates all concrete implementations of interfaces
-func createConcreteImplementations() (
-	interfaces.ConfigManager,
-	interfaces.ProtocolClient,
-	interfaces.ContentRenderer,
-	interfaces.RegistryManager,
-	interfaces.AuthManager,
-	error,
-) {
-	// Phase 2: Configuration Management Implementation
-	configManager, err := config.NewManager()
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init config manager: %w", err)
+// createTemporaryProfile creates a profile for direct host connections
+func (ca *ConsoleApp) createTemporaryProfile() *interfaces.Profile {
+	profile := &interfaces.Profile{
+		Name:          "temporary",
+		Host:          ca.args.Host,
+		Theme:         "github", // Default theme
+		Confirmations: true,
+		Auth: interfaces.AuthConfig{
+			Type: "none",
+		},
 	}
 
-	// Phase 4: Authentication and Security Implementation
-	authManager, err := auth.NewManager(configManager)
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init auth manager: %w", err)
+	// Apply theme override if specified
+	if ca.args.Theme != "" {
+		profile.Theme = ca.args.Theme
 	}
 
-	// Phase 3: Protocol Communication Layer
-	protocolClient, err := protocol.NewClient(configManager, authManager)
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init protocol client: %w", err)
-	}
-
-	// Phase 5: Rich Content Rendering System
-	contentRenderer, err := content.NewRenderer()
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init content renderer: %w", err)
-	}
-
-	// Phase 6: Application Registration and Health Monitoring
-	registryManager, err := registry.NewManager(configManager, protocolClient)
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("failed to init registry manager: %w", err)
-	}
-
-	return configManager, protocolClient, contentRenderer, registryManager, authManager, nil
-}
-
-// main implements the application entry point with comprehensive argument handling
-// and dependency injection as specified in the design document
-func main() {
-	// Parse and validate command-line arguments
-	args := parseCommandLineArgs()
-
-	// Handle help and version requests immediately
-	if args.ShowHelp {
-		flag.Usage()
-		os.Exit(0)
-	}
-
-	if args.ShowVersion {
-		fmt.Printf("%s v%s\n", ProgramName, Version)
-		fmt.Printf("Protocol Version: 2.0\n")
-		fmt.Printf("Built with Go and Charm libraries\n")
-		os.Exit(0)
-	}
-
-	// Initialize logging as early as possible
-	logConfig := logging.DefaultConfig()
-	logConfig.Level = logging.InfoLevel
-	
-	// Increase log level if we're in development mode
-	if os.Getenv("CONSOLE_DEBUG") == "true" {
-		logConfig.Level = logging.DebugLevel
-		logConfig.Format = "json"
-	}
-	
-	if err := logging.InitGlobalLogger(logConfig); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
-		os.Exit(1)
-	}
-	
-	logger := logging.GetGlobalLogger()
-	logger.Info("Universal Application Console starting",
-		"version", Version,
-		"args", fmt.Sprintf("%+v", args))
-
-	// Validate argument compatibility
-	if err := validateArguments(args); err != nil {
-		logger.Error("Invalid arguments", "error", err.Error())
-		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	// Instantiate concrete implementations of all interfaces
-	logger.Debug("Initializing application components")
-	configManager, protocolClient, contentRenderer, registryManager, authManager, err := createConcreteImplementations()
-	if err != nil {
-		logger.Error("Failed to initialize application components", "error", err.Error())
-		fmt.Fprintf(os.Stderr, "Error initializing application components: %v\n", err)
-		os.Exit(1)
-	}
-	logger.Info("Application components initialized successfully")
-
-	// Create the main application instance with dependency injection
-	consoleApp := &ConsoleApp{
-		configManager:   configManager,
-		protocolClient:  protocolClient,
-		contentRenderer: contentRenderer,
-		registryManager: registryManager,
-		authManager:     authManager,
-		args:            args,
-	}
-
-	// Create and start the appropriate Bubble Tea program
-	logger.Debug("Creating Bubble Tea program")
-	program, err := consoleApp.createBubbleTeaProgram()
-	if err != nil {
-		logger.Error("Failed to create application interface", "error", err.Error())
-		log.Fatalf("Failed to create application interface: %v", err)
-	}
-
-	// Start the TUI application
-	logger.Info("Starting TUI application")
-	if _, err := program.Run(); err != nil {
-		logger.Error("Application terminated with error", "error", err.Error())
-		log.Fatalf("Application terminated with error: %v", err)
-	}
-
-	// Graceful shutdown
-	logger.Info("Application shutdown completed successfully")
-	fmt.Println("Universal Application Console terminated successfully.")
+	return profile
 }
